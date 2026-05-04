@@ -22,6 +22,8 @@ let isReadOnlyTree = false;
 let draggedNodePath: string | null = null;
 let editingPath: string | null = null;
 let creatingInParentPath: string | null = null;
+let isAuthenticated = false;
+let viewerRequestId = 0;
 
 const app = document.querySelector<HTMLDivElement>("#app");
 
@@ -34,6 +36,7 @@ app.innerHTML = `
     <header class="topbar">
       <div class="brand">TP Browser</div>
       <div class="topbar-actions">
+        <button id="auth-btn" class="btn ghost">Se connecter</button>
         <button id="import-folder-btn" class="btn">Importer un dossier</button>
         <button id="import-zip-btn" class="btn">Importer un zip</button>
         <button id="toggle-fullscreen-btn" class="btn">Plein écran</button>
@@ -72,14 +75,44 @@ app.innerHTML = `
       ▶
     </button>
   </div>
+
+  <div id="auth-modal" class="modal is-hidden" role="dialog" aria-modal="true">
+    <div class="modal-backdrop" data-modal-close="true"></div>
+    <div class="modal-card" role="document">
+      <h2>Connexion admin</h2>
+      <p class="modal-subtitle">Entre l'identifiant et le mot de passe pour gérer les dossiers TP.</p>
+      <form id="auth-form" class="modal-form">
+        <label class="modal-field">
+          <span>Identifiant</span>
+          <input id="auth-username" type="text" autocomplete="username" required />
+        </label>
+        <label class="modal-field">
+          <span>Mot de passe</span>
+          <input id="auth-password" type="password" autocomplete="current-password" required />
+        </label>
+        <div id="auth-error" class="modal-error is-hidden">Identifiant ou mot de passe incorrect.</div>
+        <div class="modal-actions">
+          <button type="button" id="auth-cancel" class="btn ghost">Annuler</button>
+          <button type="submit" class="btn">Se connecter</button>
+        </div>
+      </form>
+    </div>
+  </div>
 `;
 
 const folderBtn = document.querySelector<HTMLButtonElement>("#import-folder-btn");
 const zipBtn = document.querySelector<HTMLButtonElement>("#import-zip-btn");
+const authBtn = document.querySelector<HTMLButtonElement>("#auth-btn");
 const openFolderBtn = document.querySelector<HTMLButtonElement>("#open-folder-btn");
 const toggleSidebarBtn = document.querySelector<HTMLButtonElement>("#toggle-sidebar-btn");
 const expandSidebarBtn = document.querySelector<HTMLButtonElement>("#expand-sidebar-btn");
 const toggleFullscreenBtn = document.querySelector<HTMLButtonElement>("#toggle-fullscreen-btn");
+const authModal = document.querySelector<HTMLDivElement>("#auth-modal");
+const authForm = document.querySelector<HTMLFormElement>("#auth-form");
+const authCancel = document.querySelector<HTMLButtonElement>("#auth-cancel");
+const authUsername = document.querySelector<HTMLInputElement>("#auth-username");
+const authPassword = document.querySelector<HTMLInputElement>("#auth-password");
+const authError = document.querySelector<HTMLDivElement>("#auth-error");
 const treeRoot = document.querySelector<HTMLDivElement>("#tree-root");
 const viewerContent = document.querySelector<HTMLDivElement>("#viewer-content");
 const shell = document.querySelector<HTMLDivElement>(".shell");
@@ -96,19 +129,95 @@ function escapeHtml(value: string): string {
     .replaceAll("'", "&#039;");
 }
 
-function setViewerHtml(html: string) {
+function beginViewerRequest(): number {
+  viewerRequestId += 1;
+  return viewerRequestId;
+}
+
+function setViewerHtml(html: string, requestId?: number) {
   if (!viewerContent) return;
+  if (requestId && requestId !== viewerRequestId) return;
   viewerContent.innerHTML = html;
 }
 
-function setViewerEmbedded(isEmbedded: boolean) {
+function setViewerEmbedded(isEmbedded: boolean, requestId?: number) {
   if (!viewerContent) return;
+  if (requestId && requestId !== viewerRequestId) return;
   viewerContent.classList.toggle("viewer-embedded", isEmbedded);
 }
 
-function renderDetails(node: TreeNode) {
+function toggleHidden(element: HTMLElement | null, hidden: boolean) {
+  if (!element) return;
+  element.classList.toggle("is-hidden", hidden);
+}
+
+function setAuthenticated(nextValue: boolean) {
+  isAuthenticated = nextValue;
+
+  if (authBtn) {
+    authBtn.textContent = isAuthenticated ? "Se déconnecter" : "Se connecter";
+  }
+
+  const hideManagement = !isAuthenticated;
+  toggleHidden(folderBtn, hideManagement);
+  toggleHidden(zipBtn, hideManagement);
+  toggleHidden(openFolderBtn, hideManagement);
+  toggleHidden(createFolderBtn, hideManagement);
+  toggleHidden(renameEntryBtn, hideManagement);
+  toggleHidden(deleteEntryBtn, hideManagement);
+
+  updateActionButtonsState();
+}
+
+function openAuthModal() {
+  if (!authModal) return;
+  toggleHidden(authModal, false);
+  toggleHidden(authError, true);
+  if (authUsername) authUsername.value = "";
+  if (authPassword) authPassword.value = "";
+  requestAnimationFrame(() => {
+    authUsername?.focus();
+  });
+}
+
+function closeAuthModal() {
+  if (!authModal) return;
+  toggleHidden(authModal, true);
+  toggleHidden(authError, true);
+}
+
+function showAuthError(message: string) {
+  if (!authError) return;
+  authError.textContent = message;
+  toggleHidden(authError, false);
+}
+
+async function loginWithCredentials(username: string, password: string) {
+  try {
+    const success = await invoke<boolean>("login", { username, password });
+    if (!success) {
+      showAuthError("Identifiant ou mot de passe incorrect.");
+      return;
+    }
+    setAuthenticated(true);
+    closeAuthModal();
+  } catch (error) {
+    showAuthError(String(error));
+  }
+}
+
+async function logout() {
+  try {
+    await invoke("logout");
+    setAuthenticated(false);
+  } catch (error) {
+    alert(`Erreur: ${String(error)}`);
+  }
+}
+
+function renderDetails(node: TreeNode, requestId?: number) {
   const kind = node.isDir ? "Dossier" : node.isZip ? "Archive ZIP" : "Fichier";
-  setViewerEmbedded(false);
+  setViewerEmbedded(false, requestId);
   setViewerHtml(`
     <div class="details-card">
       <h2>${escapeHtml(node.name)}</h2>
@@ -126,36 +235,36 @@ function renderDetails(node: TreeNode) {
         <div>${node.children.length}</div>
       </div>
     </div>
-  `);
+  `, requestId);
 }
 
-function renderFolderHint() {
-  setViewerEmbedded(false);
+function renderFolderHint(requestId?: number) {
+  setViewerEmbedded(false, requestId);
   setViewerHtml(`
     <div class="empty-state">
       Double-clique sur un dossier pour replier ou déplier son contenu.
     </div>
-  `);
+  `, requestId);
 }
 
-function renderZipResolveSpinner() {
-  setViewerEmbedded(false);
+function renderZipResolveSpinner(requestId?: number) {
+  setViewerEmbedded(false, requestId);
   setViewerHtml(`
     <div class="scan-state">
       <div class="spinner"></div>
       <p>Préparation de l’aperçu…</p>
     </div>
-  `);
+  `, requestId);
 }
 
-function renderImportSpinner() {
-  setViewerEmbedded(false);
+function renderImportSpinner(requestId?: number) {
+  setViewerEmbedded(false, requestId);
   setViewerHtml(`
     <div class="scan-state">
       <div class="spinner"></div>
       <p>Import en cours…</p>
     </div>
-  `);
+  `, requestId);
 }
 
 function setScanUi(isActive: boolean) {
@@ -165,15 +274,15 @@ function setScanUi(isActive: boolean) {
   updateActionButtonsState();
 }
 
-function renderScanSpinner() {
-  setViewerEmbedded(false);
+function renderScanSpinner(requestId?: number) {
+  setViewerEmbedded(false, requestId);
   setViewerHtml(`
     <div class="scan-state">
       <div class="spinner"></div>
       <p>Scan en cours…</p>
       <button id="cancel-scan-btn" class="btn ghost">Annuler</button>
     </div>
-  `);
+  `, requestId);
 
   const cancelBtn = document.querySelector<HTMLButtonElement>("#cancel-scan-btn");
   cancelBtn?.addEventListener("click", async () => {
@@ -183,71 +292,72 @@ function renderScanSpinner() {
       <div class="empty-state">
         Scan annulé.
       </div>
-    `);
+    `, requestId);
   });
 }
 
-async function renderEmbeddedPreview(indexPath: string) {
+async function renderEmbeddedPreview(indexPath: string, requestId?: number) {
   let previewUrl: string;
 
   try {
     previewUrl = await invoke<string>("prepare_preview", { indexPath });
   } catch (error) {
-    setViewerEmbedded(false);
+    setViewerEmbedded(false, requestId);
     setViewerHtml(`
       <div class="error-state">
         <strong>Erreur</strong>
         <pre>${escapeHtml(String(error))}</pre>
       </div>
-    `);
+    `, requestId);
     return;
   }
 
-  setViewerEmbedded(true);
+  setViewerEmbedded(true, requestId);
   setViewerHtml(`
     <iframe class="embedded-frame" src="${previewUrl}"></iframe>
-  `);
+  `, requestId);
 }
 
-function renderEmbeddedPreviewUrl(previewUrl: string) {
-  setViewerEmbedded(true);
+function renderEmbeddedPreviewUrl(previewUrl: string, requestId?: number) {
+  setViewerEmbedded(true, requestId);
   setViewerHtml(`
     <iframe class="embedded-frame" src="${previewUrl}"></iframe>
-  `);
+  `, requestId);
 }
 
 async function onNodeClick(node: TreeNode) {
+  const requestId = beginViewerRequest();
   selectedPath = node.path;
   renderTree();
   if (node.isZip && !node.indexPath) {
-    renderZipResolveSpinner();
+    renderZipResolveSpinner(requestId);
     try {
       const previewUrl = await invoke<string | null>("resolve_zip_index", {
         zipPath: node.path,
       });
       if (previewUrl) {
-        renderEmbeddedPreviewUrl(previewUrl);
+        renderEmbeddedPreviewUrl(previewUrl, requestId);
         return;
       }
-      renderDetails(node);
+      renderDetails(node, requestId);
     } catch (error) {
-      setViewerEmbedded(false);
+      setViewerEmbedded(false, requestId);
       setViewerHtml(`
         <div class="error-state">
           <strong>Erreur</strong>
           <pre>${escapeHtml(String(error))}</pre>
         </div>
-      `);
+      `, requestId);
     }
     return;
   }
 
   if (node.indexPath) {
-    await renderEmbeddedPreview(node.indexPath);
+    await renderEmbeddedPreview(node.indexPath, requestId);
   } else if (!node.isDir) {
-    renderDetails(node);
+    renderDetails(node, requestId);
   } else {
-    renderFolderHint();
+    renderFolderHint(requestId);
   }
 }
 
@@ -283,7 +393,7 @@ function isZipTreeRoot(node: TreeNode | null): boolean {
 }
 
 function updateActionButtonsState() {
-  const disabled = isScanning || isReadOnlyTree || !currentTree;
+  const disabled = isScanning || isReadOnlyTree || !currentTree || !isAuthenticated;
 
   createFolderBtn?.toggleAttribute("disabled", disabled);
   renameEntryBtn?.toggleAttribute("disabled", disabled);
@@ -307,12 +417,24 @@ function updateActionButtonsState() {
       : "Supprimer";
   }
 
-  const canImportZip = Boolean(currentRootPath) && !isScanning && !isReadOnlyTree;
+  folderBtn?.toggleAttribute("disabled", isScanning || !isAuthenticated);
+  if (folderBtn) {
+    folderBtn.title = isAuthenticated
+      ? "Importer un dossier"
+      : "Connecte-toi pour importer un dossier";
+  }
+
+  const canImportZip =
+    Boolean(currentRootPath) && !isScanning && !isReadOnlyTree && isAuthenticated;
   zipBtn?.toggleAttribute("disabled", !canImportZip);
   if (zipBtn) {
-    zipBtn.title = canImportZip
-      ? "Importer un zip dans le dossier courant"
-      : "Importe d'abord un dossier pour ajouter des zips";
+    if (!isAuthenticated) {
+      zipBtn.title = "Connecte-toi pour importer un zip";
+    } else {
+      zipBtn.title = canImportZip
+        ? "Importer un zip dans le dossier courant"
+        : "Importe d'abord un dossier pour ajouter des zips";
+    }
   }
 
   const canOpenFolder = Boolean(currentRootPath) && !isScanning;
@@ -500,7 +622,11 @@ function createTreeNodeElement(node: TreeNode): HTMLLIElement {
   const row = document.createElement("button");
   row.type = "button";
   row.className = "tree-row";
-  const canDrag = !isReadOnlyTree && node.path !== currentTree?.path && editingPath !== node.path;
+  const canDrag =
+    isAuthenticated &&
+    !isReadOnlyTree &&
+    node.path !== currentTree?.path &&
+    editingPath !== node.path;
   row.draggable = canDrag;
 
   if (selectedPath === node.path) {
@@ -588,7 +714,7 @@ row.addEventListener("dragend", () => {
   row.classList.remove("drop-target");
 });
 
-if (node.isDir && !isReadOnlyTree) {
+if (node.isDir && !isReadOnlyTree && isAuthenticated) {
   row.addEventListener("dragover", (event) => {
     const sourcePath =
       event.dataTransfer?.getData("application/x-tp-browser-node") ||
@@ -680,6 +806,10 @@ if (node.isDir && !isReadOnlyTree) {
 }
 
 createFolderBtn?.addEventListener("click", async () => {
+  if (!isAuthenticated) {
+    alert("Connecte-toi pour gérer les fichiers.");
+    return;
+  }
   if (isReadOnlyTree) {
     alert("Création impossible : l’arborescence chargée provient d’un zip.");
     return;
@@ -702,6 +832,10 @@ createFolderBtn?.addEventListener("click", async () => {
 });
 
 renameEntryBtn?.addEventListener("click", () => {
+  if (!isAuthenticated) {
+    alert("Connecte-toi pour gérer les fichiers.");
+    return;
+  }
   if (isReadOnlyTree) {
     alert("Renommage impossible : l’arborescence chargée provient d’un zip.");
     return;
@@ -721,6 +855,10 @@ renameEntryBtn?.addEventListener("click", () => {
 });
 
 deleteEntryBtn?.addEventListener("click", async () => {
+  if (!isAuthenticated) {
+    alert("Connecte-toi pour gérer les fichiers.");
+    return;
+  }
   if (isReadOnlyTree) {
     alert("Suppression impossible : l’arborescence chargée provient d’un zip.");
     return;
@@ -820,12 +958,13 @@ async function refreshTree() {
   renderTree();
 
   const selectedNode = selectedPath ? findNodeByPath(selectedPath) : null;
+  const requestId = beginViewerRequest();
   if (selectedNode?.indexPath) {
-    await renderEmbeddedPreview(selectedNode.indexPath);
+    await renderEmbeddedPreview(selectedNode.indexPath, requestId);
   } else if (selectedNode) {
-    renderDetails(selectedNode);
+    renderDetails(selectedNode, requestId);
   } else {
-    renderFolderHint();
+    renderFolderHint(requestId);
   }
 }
 
@@ -848,8 +987,9 @@ function getSelectedNode(): TreeNode | null {
 }
 
 async function scanPath(path: string) {
+  const requestId = beginViewerRequest();
   setScanUi(true);
-  renderScanSpinner();
+  renderScanSpinner(requestId);
 
   try {
     const tree = await invoke<TreeNode>("scan_source", { path });
@@ -867,11 +1007,11 @@ async function scanPath(path: string) {
     renderTree();
 
     if (tree.indexPath) {
-      await renderEmbeddedPreview(tree.indexPath);
+      await renderEmbeddedPreview(tree.indexPath, requestId);
     } else if (!tree.isDir) {
-      renderDetails(tree);
+      renderDetails(tree, requestId);
     } else {
-      renderFolderHint();
+      renderFolderHint(requestId);
     }
   } catch (error) {
     setScanUi(false);
@@ -881,21 +1021,25 @@ async function scanPath(path: string) {
         <div class="empty-state">
           Scan annulé.
         </div>
-      `);
+      `, requestId);
       return;
     }
 
-    setViewerEmbedded(false);
+    setViewerEmbedded(false, requestId);
     setViewerHtml(`
       <div class="error-state">
         <strong>Erreur</strong>
         <pre>${escapeHtml(String(error))}</pre>
       </div>
-    `);
+    `, requestId);
   }
 }
 
 folderBtn?.addEventListener("click", async () => {
+  if (!isAuthenticated) {
+    alert("Connecte-toi pour importer un dossier.");
+    return;
+  }
   const selected = await open({
     directory: true,
     multiple: false,
@@ -908,6 +1052,10 @@ folderBtn?.addEventListener("click", async () => {
 });
 
 zipBtn?.addEventListener("click", async () => {
+  if (!isAuthenticated) {
+    alert("Connecte-toi pour importer un zip.");
+    return;
+  }
   if (!currentRootPath) {
     alert("Importe d'abord un dossier pour ajouter des zips.");
     return;
@@ -930,7 +1078,8 @@ zipBtn?.addEventListener("click", async () => {
 
   if (typeof selected === "string") {
     setScanUi(true);
-    renderImportSpinner();
+    const requestId = beginViewerRequest();
+    renderImportSpinner(requestId);
     try {
       await invoke("import_zip", {
         zipPath: selected,
@@ -938,13 +1087,13 @@ zipBtn?.addEventListener("click", async () => {
       });
       await refreshTree();
     } catch (error) {
-      setViewerEmbedded(false);
+      setViewerEmbedded(false, requestId);
       setViewerHtml(`
         <div class="error-state">
           <strong>Erreur</strong>
           <pre>${escapeHtml(String(error))}</pre>
         </div>
-      `);
+      `, requestId);
     } finally {
       setScanUi(false);
     }
@@ -979,6 +1128,34 @@ toggleFullscreenBtn?.addEventListener("click", () => {
   setViewerFullscreenState(!isViewerFullscreen);
 });
 
+authBtn?.addEventListener("click", () => {
+  if (isAuthenticated) {
+    void logout();
+  } else {
+    openAuthModal();
+  }
+});
+
+authCancel?.addEventListener("click", () => {
+  closeAuthModal();
+});
+
+authModal?.addEventListener("click", (event) => {
+  const target = event.target as HTMLElement | null;
+  if (!target) return;
+  if (target.dataset.modalClose === "true") {
+    closeAuthModal();
+  }
+});
+
+authForm?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const username = authUsername?.value.trim() ?? "";
+  const password = authPassword?.value ?? "";
+  toggleHidden(authError, true);
+  await loginWithCredentials(username, password);
+});
+
 const exitFullscreenBtn = document.querySelector<HTMLButtonElement>(
   "#exit-fullscreen-btn"
 );
@@ -1006,3 +1183,4 @@ document.addEventListener("keydown", (event) => {
 
 updateActionButtonsState();
 renderTree();
+setAuthenticated(false);

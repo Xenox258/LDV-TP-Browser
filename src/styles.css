@@ -457,6 +457,86 @@ pre {
   opacity: 0.45;
   cursor: not-allowed;
 }
+
+.is-hidden {
+  display: none !important;
+}
+
+.modal {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  z-index: 20;
+}
+
+.modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(8, 8, 10, 0.72);
+}
+
+.modal-card {
+  position: relative;
+  z-index: 1;
+  width: min(420px, 90vw);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 20px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.45);
+}
+
+.modal-card h2 {
+  margin: 0 0 8px 0;
+}
+
+.modal-subtitle {
+  margin: 0 0 16px 0;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.modal-form {
+  display: grid;
+  gap: 12px;
+}
+
+.modal-field {
+  display: grid;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.modal-field input {
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: #1c1c1c;
+  color: var(--text);
+}
+
+.modal-field input:focus {
+  outline: 2px solid rgba(59, 130, 246, 0.4);
+  border-color: rgba(59, 130, 246, 0.8);
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 4px;
+}
+
+.modal-error {
+  color: #fecaca;
+  background: rgba(248, 113, 113, 0.16);
+  border: 1px solid rgba(248, 113, 113, 0.35);
+  padding: 8px 10px;
+  border-radius: 8px;
+  font-size: 13px;
+}
 .tree-row {
   -webkit-user-drag: element;
 }
