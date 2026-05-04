@@ -12,7 +12,6 @@ dist
 dist-ssr
 *.local
 .env
-src-tauri/target
 target
 **/target
 # Editor directories and files
