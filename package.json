@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "tauri": "tauri dev",
+    "tauri": "tauri",
     "dev:tauri": "concurrently \"npm:dev\" \"npm:tauri\""
   },
   "devDependencies": {
