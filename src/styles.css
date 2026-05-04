@@ -1,0 +1,498 @@
+:root {
+  color-scheme: dark;
+  --bg: #171717;
+  --panel: #1f1f1f;
+  --panel-2: #262626;
+  --border: #343434;
+  --text: #f3f3f3;
+  --muted: #aaaaaa;
+  --accent: #3b82f6;
+  --accent-2: #2563eb;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  margin: 0;
+  width: 100%;
+  height: 100%;
+  font-family: Inter, Arial, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+}
+
+button,
+input {
+  font: inherit;
+}
+
+.shell {
+  display: grid;
+  grid-template-rows: 56px 1fr;
+  height: 100vh;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 0 16px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+}
+
+.brand {
+  font-weight: 700;
+}
+
+.topbar-actions {
+  display: flex;
+  gap: 10px;
+}
+
+.btn {
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--text);
+  padding: 10px 14px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.btn:hover {
+  background: #303030;
+}
+
+.layout {
+  display: grid;
+  grid-template-columns: 320px 1fr;
+  min-height: 0;
+  /* Animation sur le grid */
+  transition: grid-template-columns 0.3s ease;
+}
+.shell.viewer-fullscreen.sidebar-collapsed .viewer-content {
+  padding-left: 0 !important;
+}
+.shell.sidebar-collapsed .layout {
+  /* Le 0px force la colonne à disparaître */
+  grid-template-columns: 0px 1fr;
+}
+
+.shell.sidebar-collapsed .sidebar {
+  /* Empêche la sidebar de forcer une largeur minimale */
+  min-width: 0px;
+  width: 0px;
+  /* Masque tout ce qui pourrait dépasser */
+  overflow: hidden;
+  border-right: none;
+}
+
+/* Assure-toi que les enfants disparaissent aussi */
+.shell.sidebar-collapsed .sidebar-header,
+.shell.sidebar-collapsed .tree-root {
+  display: none;
+}
+
+.sidebar {
+  border-right: 1px solid var(--border);
+  background: var(--panel);
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  transition: width 0.3s ease, min-width 0.3s ease;
+}
+
+.sidebar-header,
+.viewer-header {
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.sidebar-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.sidebar-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.icon-btn {
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--text);
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+}
+
+.icon-btn.icon-collapse {
+  border-color: rgba(59, 130, 246, 0.6);
+  background: rgba(59, 130, 246, 0.15);
+  color: #cfe3ff;
+}
+
+.icon-btn:hover {
+  background: #303030;
+}
+
+.tree-root {
+  padding: 12px;
+  overflow: auto;
+  min-height: 0;
+}
+
+.viewer {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  background: #111;
+  position: relative;
+}
+
+.viewer-hover-zone {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 64px;
+  height: 64px;
+  z-index: 6;
+}
+
+.shell.viewer-fullscreen .topbar,
+.shell.viewer-fullscreen .sidebar {
+  display: none;
+}
+/* Ajoute un padding gauche quand la sidebar est fermée pour éviter l'overlap */
+.shell.sidebar-collapsed .viewer-content {
+  padding-left: 60px; /* Ajuste cette valeur selon la taille de ton bouton */
+}
+
+.shell.viewer-fullscreen .layout {
+  grid-template-columns: 1fr;
+}
+
+.shell.viewer-fullscreen {
+  grid-template-rows: 1fr;
+}
+
+.shell.viewer-fullscreen .viewer {
+  height: 100vh;
+}
+
+.shell.viewer-fullscreen .expand-sidebar-btn {
+  display: none;
+}
+
+.exit-fullscreen-btn {
+  position: absolute;
+  top: 48px;
+  right: 16px;
+  border: 1px solid var(--border);
+  background: rgba(31, 31, 31, 0.9);
+  color: var(--text);
+  width: 32px;
+  height: 32px;
+  border-radius: 999px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s ease;
+}
+
+.shell.viewer-fullscreen .viewer-hover-zone:hover .exit-fullscreen-btn {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.expand-sidebar-btn {
+  position: fixed;
+  top: 72px;
+  left: 12px;
+  z-index: 6;
+  border: 1px solid var(--border);
+  background: rgba(31, 31, 31, 0.9);
+  color: var(--text);
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s ease;
+}
+
+.expand-sidebar-btn.visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.viewer-content {
+  flex: 1;
+  overflow: auto;
+  padding: 20px;
+}
+
+.viewer-content.viewer-embedded {
+  padding: 0;
+  overflow: hidden;
+}
+
+.embedded-frame {
+  width: 100%;
+  height: 100%;
+  border: 0;
+  display: block;
+  background: #fff;
+}
+
+.tree,
+.tree-children {
+  list-style: none;
+  margin: 0;
+  padding-left: 14px;
+}
+
+/* Style de la flèche */
+.arrow {
+  display: inline-block;
+  font-size: 10px;
+  margin-right: 4px;
+  transition: transform 0.2s ease;
+  color: var(--muted);
+}
+
+/* Rotation quand le dossier est déplié */
+.arrow.expanded {
+  transform: rotate(90deg);
+}
+
+/* Espace pour aligner les fichiers qui n'ont pas de flèche */
+.arrow-spacer {
+  width: 14px; /* Correspond à la taille de la flèche + marge */
+  display: inline-block;
+}
+
+.tree,
+.tree-children {
+  list-style: none;
+  margin: 0;
+  padding-left: 14px;
+}
+
+.tree {
+  padding-left: 0;
+}
+
+.tree-children-wrap {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition:
+    grid-template-rows 0.22s ease,
+    opacity 0.18s ease;
+  opacity: 0.6;
+}
+
+.tree-children-wrap.expanded {
+  grid-template-rows: 1fr;
+  opacity: 1;
+}
+
+.tree-children-inner {
+  overflow: hidden;
+}
+
+.tree-children {
+  margin-top: 4px;
+}
+
+
+.tree-node {
+  margin: 4px 0;
+}
+
+.tree-row {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  text-align: left;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--text);
+  padding: 8px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.tree-row:hover {
+  background: #2a2a2a;
+}
+
+.tree-row.selected {
+  background: rgba(59, 130, 246, 0.18);
+  border-color: rgba(59, 130, 246, 0.35);
+}
+
+.tree-icon {
+  width: 20px;
+  text-align: center;
+}
+
+.tree-label {
+  word-break: break-word;
+}
+
+.empty-state,
+.empty-tree,
+.error-state,
+.details-card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 16px;
+}
+
+.scan-state {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  text-align: center;
+}
+
+.spinner {
+  width: 40px;
+  height: 40px;
+  border-radius: 999px;
+  border: 4px solid rgba(255, 255, 255, 0.2);
+  border-top-color: var(--accent);
+  animation: spin 0.9s linear infinite;
+}
+
+.btn.ghost {
+  background: transparent;
+  border: 1px solid var(--border);
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.details-card h2 {
+  margin-top: 0;
+  margin-bottom: 16px;
+}
+
+.details-grid {
+  display: grid;
+  grid-template-columns: 140px 1fr;
+  gap: 10px 14px;
+}
+
+
+.label {
+  color: var(--muted);
+}
+
+.mono,
+pre {
+  font-family: "Fira Code", "Cascadia Code", monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+@media (max-width: 900px) {
+  .layout {
+    grid-template-columns: 1fr;
+    grid-template-rows: 280px 1fr;
+  }
+
+  .sidebar {
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+  }
+}
+.tree-row.dragging {
+  opacity: 0.45;
+}
+
+.tree-row.drop-target {
+  outline: 1px solid rgba(90, 160, 255, 0.9);
+  background: rgba(90, 160, 255, 0.12);
+}
+
+.icon-btn[disabled],
+.btn[disabled] {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.tree-row {
+  -webkit-user-drag: element;
+}
+
+.tree-row.dragging {
+  opacity: 0.45;
+}
+
+.tree-row.drop-target {
+  outline: 1px solid rgba(90, 160, 255, 0.9);
+  background: rgba(90, 160, 255, 0.12);
+}
+
+.icon-btn[disabled],
+.btn[disabled] {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.tree-inline-input {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid rgba(59, 130, 246, 0.35);
+  background: #202734;
+  color: var(--text);
+  border-radius: 6px;
+  padding: 4px 8px;
+  outline: none;
+}
+
+.tree-inline-input:focus {
+  border-color: rgba(59, 130, 246, 0.8);
+  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.18);
+}
+
+.tree-row-creating {
+  background: rgba(59, 130, 246, 0.08);
+  border-color: rgba(59, 130, 246, 0.18);
+}
