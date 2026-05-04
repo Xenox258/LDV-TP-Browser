@@ -1,10 +1,7 @@
-# Tauri + Vanilla
-
-This template should help get you started developing with Tauri in vanilla HTML, CSS and Javascript.
 
 ## Description de l'app
 
-TP Browser est une application Tauri qui permet de parcourir un dossier de travaux pratiques (TP), d'afficher une arborescence de fichiers et de prévisualiser les contenus HTML via un aperçu intégré. L'application propose un mode lecture seule pour consulter les fichiers déjà chargés, et un mode admin (authentification) pour importer des dossiers/zips et gérer les fichiers (création, renommage, suppression, déplacement).
+TP Browser est un lecteur de TP Scenari conçu pour une utilisation au lycée du Vimeu. L'application Tauri permet de parcourir un dossier de TP, d'afficher une arborescence de fichiers et de prévisualiser les contenus HTML via un aperçu intégré. Elle propose un mode lecture seule pour consulter les fichiers déjà chargés (Vue Eleve), et un mode admin (authentification pour Prof) pour importer des dossiers/zips et gérer les fichiers (création, renommage, suppression, déplacement).
 
 ## Connexion admin (fichier .env)
 
