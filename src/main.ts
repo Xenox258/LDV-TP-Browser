@@ -2,6 +2,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import type { DragDropEvent } from "@tauri-apps/api/window";
+import lyceeLogo from "./assets/LOGO_LYCEE-VIMEU_00-659MO.png";
 import "/styles.css";
 
 type TreeNode = {
@@ -18,6 +20,11 @@ type SavedSource = {
   tree: TreeNode;
 };
 
+type SidebarDropTarget = {
+  type: "into" | "before" | "after";
+  path: string;
+};
+
 let currentTree: TreeNode | null = null;
 let selectedPath: string | null = null;
 const expandedPaths = new Set<string>();
@@ -27,9 +34,24 @@ let isScanning = false;
 let currentRootPath: string | null = null;
 let isReadOnlyTree = false;
 let draggedNodePath: string | null = null;
+let pointerDrag:
+  | {
+      sourcePath: string;
+      sourceRow: HTMLElement;
+      startX: number;
+      startY: number;
+      active: boolean;
+      ghost: HTMLDivElement | null;
+      target: SidebarDropTarget | null;
+    }
+  | null = null;
+let suppressNextTreeClick = false;
 let editingPath: string | null = null;
 let creatingInParentPath: string | null = null;
 let isAuthenticated = false;
+let isExportingStudentArchive = false;
+let lastSourceSnapshot: string | null = null;
+let isCheckingSourceChanges = false;
 let viewerRequestId = 0;
 
 const app = document.querySelector<HTMLDivElement>("#app");
@@ -44,9 +66,10 @@ app.innerHTML = `
       <div class="brand">TP Browser</div>
       <div class="topbar-actions">
         <button id="auth-btn" class="btn ghost">Se connecter</button>
-        <button id="account-btn" class="btn ghost">Compte</button>
-        <button id="import-folder-btn" class="btn">Importer un dossier</button>
-        <button id="import-zip-btn" class="btn">Importer un zip</button>
+        <button id="account-btn" class="btn ghost is-hidden">Compte</button>
+        <button id="import-folder-btn" class="btn is-hidden">Importer un dossier</button>
+        <button id="import-zip-btn" class="btn is-hidden">Importer un zip</button>
+        <button id="export-student-btn" class="btn is-hidden">Exporter version élève</button>
         <button id="toggle-fullscreen-btn" class="btn">Plein écran</button>
       </div>
     </header>
@@ -65,6 +88,9 @@ app.innerHTML = `
 </div>
   </div>
         <div id="tree-root" class="tree-root"></div>
+        <div class="sidebar-logo">
+          <img src="${lyceeLogo}" alt="Lycee du Vimeu" />
+        </div>
       </aside>
 
       <section class="viewer">
@@ -190,6 +216,7 @@ const folderBtn = document.querySelector<HTMLButtonElement>("#import-folder-btn"
 const zipBtn = document.querySelector<HTMLButtonElement>("#import-zip-btn");
 const authBtn = document.querySelector<HTMLButtonElement>("#auth-btn");
 const accountBtn = document.querySelector<HTMLButtonElement>("#account-btn");
+const exportStudentBtn = document.querySelector<HTMLButtonElement>("#export-student-btn");
 const openFolderBtn = document.querySelector<HTMLButtonElement>("#open-folder-btn");
 const toggleSidebarBtn = document.querySelector<HTMLButtonElement>("#toggle-sidebar-btn");
 const expandSidebarBtn = document.querySelector<HTMLButtonElement>("#expand-sidebar-btn");
@@ -269,6 +296,7 @@ function setAuthenticated(nextValue: boolean) {
   toggleHidden(accountBtn, hideManagement);
   toggleHidden(folderBtn, hideManagement);
   toggleHidden(zipBtn, hideManagement);
+  toggleHidden(exportStudentBtn, hideManagement);
   toggleHidden(openFolderBtn, hideManagement);
   toggleHidden(createFolderBtn, hideManagement);
   toggleHidden(renameEntryBtn, hideManagement);
@@ -468,6 +496,39 @@ function renderImportSpinner(requestId?: number) {
   `, requestId);
 }
 
+function renderExportSpinner(requestId?: number) {
+  setViewerEmbedded(false, requestId);
+  setViewerHtml(`
+    <div class="scan-state">
+      <div class="spinner"></div>
+      <p>Export élève en cours...</p>
+    </div>
+  `, requestId);
+}
+
+function renderExportSuccess(exportPath: string, requestId?: number) {
+  setViewerEmbedded(false, requestId);
+  setViewerHtml(`
+    <div class="scan-state">
+      <strong>Export réussi</strong>
+      <p>L'archive élève a été créée.</p>
+      <pre>${escapeHtml(exportPath)}</pre>
+      <button id="open-export-folder-btn" class="btn">Ouvrir le dossier</button>
+    </div>
+  `, requestId);
+
+  const openExportFolderBtn = document.querySelector<HTMLButtonElement>(
+    "#open-export-folder-btn"
+  );
+  openExportFolderBtn?.addEventListener("click", async () => {
+    try {
+      await invoke("open_parent_folder", { path: exportPath });
+    } catch (error) {
+      alert(`Erreur: ${String(error)}`);
+    }
+  });
+}
+
 function setScanUi(isActive: boolean) {
   isScanning = isActive;
   folderBtn?.toggleAttribute("disabled", isActive);
@@ -564,6 +625,8 @@ async function onNodeClick(node: TreeNode) {
   } else {
     renderFolderHint(requestId);
   }
+
+  await updateSourceSnapshot();
 }
 
 function updateNodeIndexPath(targetPath: string, indexPath: string) {
@@ -649,6 +712,23 @@ function updateActionButtonsState() {
     }
   }
 
+  const canExportStudent =
+    Boolean(currentRootPath) &&
+    !isScanning &&
+    !isExportingStudentArchive &&
+    !isReadOnlyTree &&
+    isAuthenticated;
+  exportStudentBtn?.toggleAttribute("disabled", !canExportStudent);
+  if (exportStudentBtn) {
+    if (!isAuthenticated) {
+      exportStudentBtn.title = "Connecte-toi pour exporter";
+    } else {
+      exportStudentBtn.title = canExportStudent
+        ? "Créer une archive élève a cote du dossier TP"
+        : "Importe un dossier TP pour exporter";
+    }
+  }
+
   const canOpenFolder = Boolean(currentRootPath) && !isScanning;
   openFolderBtn?.toggleAttribute("disabled", !canOpenFolder);
   if (openFolderBtn) {
@@ -666,6 +746,54 @@ function isAncestorPath(ancestorPath: string, targetPath: string): boolean {
     : `${ancestorPath}/`;
 
   return targetPath.startsWith(normalizedAncestor) || targetPath.startsWith(`${ancestorPath}\\`);
+}
+
+function getParentNode(childPath: string): TreeNode | null {
+  if (!currentTree || currentTree.path === childPath) return null;
+
+  const stack: TreeNode[] = [currentTree];
+  while (stack.length) {
+    const node = stack.pop();
+    if (!node) continue;
+
+    if (node.children.some((child) => child.path === childPath)) {
+      return node;
+    }
+
+    for (const child of node.children) {
+      if (child.isDir) {
+        stack.push(child);
+      }
+    }
+  }
+
+  return null;
+}
+
+function getSiblingNamesWithMove(
+  parent: TreeNode,
+  sourceName: string,
+  targetName: string,
+  position: "before" | "after"
+): string[] {
+  const names = parent.children
+    .map((child) => child.name)
+    .filter((name) => name !== sourceName);
+
+  const targetIndex = names.indexOf(targetName);
+  if (targetIndex === -1) {
+    return [...names, sourceName];
+  }
+
+  names.splice(position === "before" ? targetIndex : targetIndex + 1, 0, sourceName);
+  return names;
+}
+
+async function saveSidebarOrder(parentPath: string, childNames: string[]) {
+  await invoke("save_sidebar_order", {
+    parentPath,
+    childNames,
+  });
 }
 
 async function handleInternalDrop(sourcePath: string, destinationDir: string) {
@@ -709,6 +837,77 @@ async function handleInternalDrop(sourcePath: string, destinationDir: string) {
   }
 }
 
+async function handleSidebarDrop(sourcePath: string, target: SidebarDropTarget) {
+  if (target.type === "into") {
+    await handleInternalDrop(sourcePath, target.path);
+    return;
+  }
+
+  if (isReadOnlyTree) {
+    alert("RÃ©organisation impossible : lâ€™arborescence chargÃ©e provient dâ€™un zip.");
+    return;
+  }
+
+  const sourceNode = findNodeByPath(sourcePath);
+  const targetNode = findNodeByPath(target.path);
+  const targetParent = getParentNode(target.path);
+
+  if (!sourceNode || !targetNode || !targetParent) {
+    return;
+  }
+
+  if (sourceNode.path === currentTree?.path) {
+    alert("Impossible de dÃ©placer le dossier racine.");
+    return;
+  }
+
+  const sourceParent = getParentNode(sourcePath);
+  if (!sourceParent) {
+    return;
+  }
+
+  if (sourceParent.path !== targetParent.path) {
+    try {
+      const childNames = getSiblingNamesWithMove(
+        targetParent,
+        sourceNode.name,
+        targetNode.name,
+        target.type
+      );
+      await invoke("move_entry", {
+        sourcePath,
+        destinationDir: targetParent.path,
+      });
+      await saveSidebarOrder(targetParent.path, childNames);
+      expandedPaths.add(targetParent.path);
+      selectedPath = null;
+      await refreshTree();
+      return;
+    } catch (error) {
+      alert(`Erreur: ${String(error)}`);
+      return;
+    }
+  }
+
+  if (sourceNode.path === targetNode.path) {
+    return;
+  }
+
+  try {
+    const childNames = getSiblingNamesWithMove(
+      targetParent,
+      sourceNode.name,
+      targetNode.name,
+      target.type
+    );
+    await saveSidebarOrder(targetParent.path, childNames);
+    selectedPath = sourceNode.path;
+    await refreshTree();
+  } catch (error) {
+    alert(`Erreur: ${String(error)}`);
+  }
+}
+
 function createDragGhost(label: string): HTMLDivElement {
   const ghost = document.createElement("div");
   ghost.textContent = label;
@@ -731,6 +930,178 @@ function createDragGhost(label: string): HTMLDivElement {
   ghost.style.zIndex = "9999";
   document.body.appendChild(ghost);
   return ghost;
+}
+
+function moveDragGhost(ghost: HTMLDivElement, clientX: number, clientY: number) {
+  ghost.style.left = `${clientX + 12}px`;
+  ghost.style.top = `${clientY + 12}px`;
+}
+
+function findDropTargetAt(clientX: number, clientY: number): SidebarDropTarget | null {
+  const element = document.elementFromPoint(clientX, clientY);
+  const sidebarElement = element?.closest(".sidebar");
+
+  if (!sidebarElement || isReadOnlyTree || !isAuthenticated) {
+    return null;
+  }
+
+  const row = element?.closest<HTMLElement>(".tree-row[data-node-path]");
+  const rowPath = row?.dataset.nodePath;
+
+  if (row && rowPath) {
+    const node = findNodeByPath(rowPath);
+    if (!node) return null;
+
+    const rect = row.getBoundingClientRect();
+    const offsetY = clientY - rect.top;
+    const edgeSize = Math.min(12, rect.height * 0.35);
+
+    if (offsetY <= edgeSize) {
+      return { type: "before", path: node.path };
+    }
+
+    if (offsetY >= rect.height - edgeSize) {
+      return { type: "after", path: node.path };
+    }
+
+    if (node.isDir) {
+      return { type: "into", path: node.path };
+    }
+  }
+
+  return currentTree ? { type: "into", path: currentTree.path } : null;
+}
+
+function clearDropTarget() {
+  document
+    .querySelectorAll<HTMLElement>(".tree-row.drop-target, .tree-row.drop-before, .tree-row.drop-after")
+    .forEach((row) => row.classList.remove("drop-target", "drop-before", "drop-after"));
+}
+
+function markDropTarget(target: SidebarDropTarget | null) {
+  clearDropTarget();
+  if (!target) return;
+
+  const row = document.querySelector<HTMLElement>(
+    `.tree-row[data-node-path="${CSS.escape(target.path)}"]`
+  );
+  row?.classList.add(
+    target.type === "before"
+      ? "drop-before"
+      : target.type === "after"
+        ? "drop-after"
+        : "drop-target"
+  );
+}
+
+function canUseDropTarget(sourcePath: string, target: SidebarDropTarget | null): target is SidebarDropTarget {
+  if (!target || sourcePath === target.path) return false;
+
+  const sourceNode = findNodeByPath(sourcePath);
+  const targetNode = findNodeByPath(target.path);
+
+  if (!sourceNode || !targetNode) return false;
+  if (sourceNode.path === currentTree?.path) return false;
+
+  if (target.type === "into") {
+    if (!targetNode.isDir) return false;
+    if (sourceNode.isDir && isAncestorPath(sourceNode.path, targetNode.path)) return false;
+  } else if (!getParentNode(targetNode.path)) {
+    return false;
+  }
+
+  return true;
+}
+
+function updatePointerDropTarget(clientX: number, clientY: number) {
+  if (!pointerDrag) return;
+
+  const target = findDropTargetAt(clientX, clientY);
+  pointerDrag.target = canUseDropTarget(pointerDrag.sourcePath, target)
+    ? target
+    : null;
+  markDropTarget(pointerDrag.target);
+}
+
+function cleanupPointerDrag() {
+  draggedNodePath = null;
+  clearDropTarget();
+
+  if (!pointerDrag) return;
+
+  pointerDrag.sourceRow.classList.remove("dragging");
+  pointerDrag.ghost?.remove();
+  pointerDrag = null;
+}
+
+async function importExternalPaths(paths: string[], destinationDir: string) {
+  if (isReadOnlyTree) {
+    alert("Import impossible : l'arborescence chargee provient d'un zip.");
+    return;
+  }
+
+  if (!isAuthenticated) {
+    alert("Connecte-toi pour ajouter des fichiers.");
+    return;
+  }
+
+  if (!currentRootPath) {
+    alert("Importe d'abord un dossier.");
+    return;
+  }
+
+  if (paths.length === 0) return;
+
+  setScanUi(true);
+  const requestId = beginViewerRequest();
+  renderImportSpinner(requestId);
+  try {
+    await invoke("import_entries", {
+      sourcePaths: paths,
+      destinationDir,
+    });
+    expandedPaths.add(destinationDir);
+    await refreshTree();
+  } catch (error) {
+    setViewerEmbedded(false, requestId);
+    setViewerHtml(`
+      <div class="error-state">
+        <strong>Erreur</strong>
+        <pre>${escapeHtml(String(error))}</pre>
+      </div>
+    `, requestId);
+  } finally {
+    setScanUi(false);
+  }
+}
+
+function toClientPosition(position: { x: number; y: number }) {
+  const scale = window.devicePixelRatio || 1;
+  return {
+    x: position.x / scale,
+    y: position.y / scale,
+  };
+}
+
+function handleNativeDragDropEvent(payload: DragDropEvent) {
+  if (payload.type === "leave") {
+    clearDropTarget();
+    return;
+  }
+
+  const position = toClientPosition(payload.position);
+  const target = findDropTargetAt(position.x, position.y);
+  const destinationPath = target?.type === "into" ? target.path : getParentNode(target?.path ?? "")?.path;
+
+  if (payload.type === "drop") {
+    clearDropTarget();
+    if (destinationPath) {
+      void importExternalPaths(payload.paths, destinationPath);
+    }
+    return;
+  }
+
+  markDropTarget(destinationPath ? { type: "into", path: destinationPath } : null);
 }
 
 function cancelInlineEditing() {
@@ -839,7 +1210,8 @@ function createTreeNodeElement(node: TreeNode): HTMLLIElement {
     !isReadOnlyTree &&
     node.path !== currentTree?.path &&
     editingPath !== node.path;
-  row.draggable = canDrag;
+  row.draggable = false;
+  row.dataset.nodePath = node.path;
 
   if (selectedPath === node.path) {
     row.classList.add("selected");
@@ -880,6 +1252,11 @@ if (isEditingThisNode) {
 }
 
   row.addEventListener("click", (event) => {
+  if (suppressNextTreeClick) {
+    suppressNextTreeClick = false;
+    event.preventDefault();
+    return;
+  }
   if (editingPath === node.path) {
     event.preventDefault();
     return;
@@ -896,73 +1273,78 @@ row.addEventListener("dblclick", (event) => {
   toggleNodeExpansion(node);
 });
 
-  row.addEventListener("dragstart", (event) => {
-  if (!canDrag || isReadOnlyTree) {
-    event.preventDefault();
+row.addEventListener("pointerdown", (event) => {
+  if (
+    !canDrag ||
+    event.button !== 0 ||
+    editingPath === node.path ||
+    event.target instanceof HTMLInputElement
+  ) {
     return;
   }
 
-  draggedNodePath = node.path;
-  row.classList.add("dragging");
+  pointerDrag = {
+    sourcePath: node.path,
+    sourceRow: row,
+    startX: event.clientX,
+    startY: event.clientY,
+    active: false,
+    ghost: null,
+    target: null,
+  };
+  row.setPointerCapture(event.pointerId);
+});
 
-  event.dataTransfer?.setData("text/plain", node.path);
-  event.dataTransfer?.setData("application/x-tp-browser-node", node.path);
+row.addEventListener("pointermove", (event) => {
+  if (!pointerDrag || pointerDrag.sourcePath !== node.path) return;
 
-  if (event.dataTransfer) {
-    event.dataTransfer.effectAllowed = "move";
+  const distance = Math.hypot(
+    event.clientX - pointerDrag.startX,
+    event.clientY - pointerDrag.startY
+  );
 
-    const ghost = createDragGhost(node.name);
-    event.dataTransfer.setDragImage(ghost, 12, 12);
+  if (!pointerDrag.active && distance < 6) {
+    return;
+  }
 
-    requestAnimationFrame(() => {
-      ghost.remove();
-    });
+  event.preventDefault();
+
+  if (!pointerDrag.active) {
+    pointerDrag.active = true;
+    draggedNodePath = node.path;
+    row.classList.add("dragging");
+    pointerDrag.ghost = createDragGhost(node.name);
+    suppressNextTreeClick = true;
+  }
+
+  if (pointerDrag.ghost) {
+    moveDragGhost(pointerDrag.ghost, event.clientX, event.clientY);
+  }
+  updatePointerDropTarget(event.clientX, event.clientY);
+});
+
+row.addEventListener("pointerup", (event) => {
+  if (!pointerDrag || pointerDrag.sourcePath !== node.path) return;
+
+  const target = pointerDrag.target;
+  const wasActive = pointerDrag.active;
+  cleanupPointerDrag();
+
+  if (wasActive) {
+    event.preventDefault();
+    suppressNextTreeClick = true;
+    if (target) {
+      void handleSidebarDrop(node.path, target);
+    }
   }
 });
 
-row.addEventListener("dragend", () => {
-  draggedNodePath = null;
-  row.classList.remove("dragging");
-  row.classList.remove("drop-target");
+row.addEventListener("pointercancel", () => {
+  if (pointerDrag?.sourcePath === node.path) {
+    cleanupPointerDrag();
+  }
 });
 
-if (node.isDir && !isReadOnlyTree && isAuthenticated) {
-  row.addEventListener("dragover", (event) => {
-    const sourcePath =
-      event.dataTransfer?.getData("application/x-tp-browser-node") ||
-      draggedNodePath;
-
-    if (!sourcePath || sourcePath === node.path) {
-      return;
-    }
-
-    event.preventDefault();
-    if (event.dataTransfer) {
-      event.dataTransfer.dropEffect = "move";
-    }
-    row.classList.add("drop-target");
-  });
-
-  row.addEventListener("dragleave", () => {
-    row.classList.remove("drop-target");
-  });
-
-  row.addEventListener("drop", async (event) => {
-    row.classList.remove("drop-target");
-
-    const sourcePath =
-      event.dataTransfer?.getData("application/x-tp-browser-node") ||
-      draggedNodePath;
-
-    if (!sourcePath) {
-      return;
-    }
-
-    event.preventDefault();
-    draggedNodePath = null;
-    await handleInternalDrop(sourcePath, node.path);
-  });
-}
   li.appendChild(row);
 
   if (node.children.length > 0) {
@@ -1066,7 +1448,7 @@ renameEntryBtn?.addEventListener("click", () => {
   renderTree();
 });
 
-deleteEntryBtn?.addEventListener("click", async () => {
+async function deleteSelectedEntry() {
   if (!isAuthenticated) {
     alert("Connecte-toi pour gérer les fichiers.");
     return;
@@ -1098,6 +1480,10 @@ deleteEntryBtn?.addEventListener("click", async () => {
   } catch (error) {
     alert(`Erreur: ${String(error)}`);
   }
+}
+
+deleteEntryBtn?.addEventListener("click", () => {
+  void deleteSelectedEntry();
 });
 
 forgetSourceBtn?.addEventListener("click", async () => {
@@ -1203,7 +1589,7 @@ async function refreshTree() {
   const previousSelectedPath = selectedPath;
   const previousExpanded = new Set(expandedPaths);
 
-  const tree = await invoke<TreeNode>("scan_source", { path: currentRootPath });
+  const tree = await invoke<TreeNode>("rescan_current_source");
   currentTree = tree;
   isReadOnlyTree = isZipTreeRoot(tree);
   updateActionButtonsState();
@@ -1232,6 +1618,8 @@ async function refreshTree() {
   } else {
     renderFolderHint(requestId);
   }
+
+  await updateSourceSnapshot();
 }
 
 function findNodeByPathInTree(root: TreeNode, path: string): TreeNode | null {
@@ -1256,6 +1644,7 @@ async function applyLoadedTree(path: string, tree: TreeNode, requestId?: number)
   currentRootPath = path;
   currentTree = tree;
   isReadOnlyTree = isZipTreeRoot(tree);
+  lastSourceSnapshot = null;
   selectedPath = tree.path;
 
   expandedPaths.clear();
@@ -1272,6 +1661,8 @@ async function applyLoadedTree(path: string, tree: TreeNode, requestId?: number)
   } else {
     renderFolderHint(requestId);
   }
+
+  await updateSourceSnapshot();
 }
 
 async function loadSavedSource() {
@@ -1332,6 +1723,50 @@ async function scanPath(path: string) {
         <pre>${escapeHtml(String(error))}</pre>
       </div>
     `, requestId);
+  }
+}
+
+async function updateSourceSnapshot() {
+  if (!currentRootPath || isReadOnlyTree) {
+    lastSourceSnapshot = null;
+    return;
+  }
+
+  try {
+    lastSourceSnapshot = await invoke<string>("get_source_snapshot");
+  } catch (error) {
+    console.error("Snapshot dossier TP impossible:", error);
+  }
+}
+
+async function checkSourceChanges() {
+  if (
+    !currentRootPath ||
+    isReadOnlyTree ||
+    isScanning ||
+    isExportingStudentArchive ||
+    isCheckingSourceChanges
+  ) {
+    return;
+  }
+
+  isCheckingSourceChanges = true;
+  try {
+    const snapshot = await invoke<string>("get_source_snapshot");
+    if (lastSourceSnapshot === null) {
+      lastSourceSnapshot = snapshot;
+      return;
+    }
+
+    if (snapshot !== lastSourceSnapshot) {
+      lastSourceSnapshot = snapshot;
+      await refreshTree();
+      await updateSourceSnapshot();
+    }
+  } catch (error) {
+    console.error("Verification des changements impossible:", error);
+  } finally {
+    isCheckingSourceChanges = false;
   }
 }
 
@@ -1397,6 +1832,52 @@ zipBtn?.addEventListener("click", async () => {
     } finally {
       setScanUi(false);
     }
+  }
+});
+
+void getCurrentWindow()
+  .onDragDropEvent((event) => {
+    handleNativeDragDropEvent(event.payload);
+  })
+  .catch((error) => {
+    console.error("Impossible d'initialiser le depot de fichiers:", error);
+  });
+
+treeRoot?.addEventListener("dragstart", (event) => {
+  event.preventDefault();
+});
+
+exportStudentBtn?.addEventListener("click", async () => {
+  if (!isAuthenticated) {
+    alert("Connecte-toi pour exporter.");
+    return;
+  }
+  if (!currentRootPath || isReadOnlyTree) {
+    alert("Importe un dossier TP pour exporter.");
+    return;
+  }
+
+  const requestId = beginViewerRequest();
+  isExportingStudentArchive = true;
+  updateActionButtonsState();
+  exportStudentBtn.textContent = "Export...";
+  renderExportSpinner(requestId);
+
+  try {
+    const exportPath = await invoke<string>("export_for_students");
+    renderExportSuccess(exportPath, requestId);
+  } catch (error) {
+    setViewerEmbedded(false, requestId);
+    setViewerHtml(`
+      <div class="error-state">
+        <strong>Erreur export</strong>
+        <pre>${escapeHtml(String(error))}</pre>
+      </div>
+    `, requestId);
+  } finally {
+    isExportingStudentArchive = false;
+    exportStudentBtn.textContent = "Exporter élève";
+    updateActionButtonsState();
   }
 });
 
@@ -1576,7 +2057,29 @@ document.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && isViewerFullscreen) {
     event.preventDefault();
     void setViewerFullscreenState(false);
+    return;
   }
+
+  if (event.key !== "Delete") {
+    return;
+  }
+
+  const target = event.target as HTMLElement | null;
+  const isTyping =
+    target instanceof HTMLInputElement ||
+    target instanceof HTMLTextAreaElement ||
+    target instanceof HTMLSelectElement ||
+    Boolean(target?.isContentEditable);
+  const hasOpenModal =
+    Boolean(authModal && !authModal.classList.contains("is-hidden")) ||
+    Boolean(accountModal && !accountModal.classList.contains("is-hidden"));
+
+  if (isTyping || hasOpenModal || editingPath || creatingInParentPath) {
+    return;
+  }
+
+  event.preventDefault();
+  void deleteSelectedEntry();
 });
 
 void listen<string>("reset_link", (event) => {
@@ -1589,6 +2092,10 @@ void invoke<string | null>("take_initial_reset_token").then((token) => {
     void openAuthReset(token);
   }
 });
+
+window.setInterval(() => {
+  void checkSourceChanges();
+}, 2500);
 
 updateActionButtonsState();
 renderTree();

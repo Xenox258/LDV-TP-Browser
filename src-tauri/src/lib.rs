@@ -9,13 +9,15 @@ use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::fs::File;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{Emitter, Manager, Url, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_deep_link::DeepLinkExt;
-use zip::ZipArchive;
+use zip::write::SimpleFileOptions;
+use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
 #[derive(Debug, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -61,6 +63,8 @@ struct AccountStore {
 #[serde(rename_all = "camelCase")]
 struct AppConfig {
     source_path: Option<String>,
+    #[serde(default)]
+    sidebar_order: HashMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -83,21 +87,17 @@ struct ZipCacheEntry {
 }
 
 fn get_admin_username() -> Result<String, String> {
-    env::var("ADMIN_USERNAME").map_err(|_| {
-        "ADMIN_USERNAME manquant dans le fichier .env".to_string()
-    })
+    env::var("ADMIN_USERNAME")
+        .map_err(|_| "ADMIN_USERNAME manquant dans le fichier .env".to_string())
 }
 
 fn get_admin_password_hash() -> Result<String, String> {
-    env::var("ADMIN_PASSWORD_HASH").map_err(|_| {
-        "ADMIN_PASSWORD_HASH manquant dans le fichier .env".to_string()
-    })
+    env::var("ADMIN_PASSWORD_HASH")
+        .map_err(|_| "ADMIN_PASSWORD_HASH manquant dans le fichier .env".to_string())
 }
 
 fn get_admin_email() -> Result<String, String> {
-    env::var("ADMIN_EMAIL").map_err(|_| {
-        "ADMIN_EMAIL manquant dans le fichier .env".to_string()
-    })
+    env::var("ADMIN_EMAIL").map_err(|_| "ADMIN_EMAIL manquant dans le fichier .env".to_string())
 }
 
 fn new_preview_id() -> Result<String, String> {
@@ -151,10 +151,9 @@ fn load_app_config(app: &tauri::AppHandle) -> Result<AppConfig, String> {
         return Ok(AppConfig::default());
     }
 
-    let data = fs::read_to_string(&path)
-        .map_err(|e| format!("Lecture config impossible: {}", e))?;
-    serde_json::from_str::<AppConfig>(&data)
-        .map_err(|e| format!("Config invalide: {}", e))
+    let data =
+        fs::read_to_string(&path).map_err(|e| format!("Lecture config impossible: {}", e))?;
+    serde_json::from_str::<AppConfig>(&data).map_err(|e| format!("Config invalide: {}", e))
 }
 
 fn save_app_config(app: &tauri::AppHandle, config: &AppConfig) -> Result<(), String> {
@@ -179,8 +178,8 @@ fn load_account(app: &tauri::AppHandle) -> Result<AccountStore, String> {
     let path = account_file_path(app)?;
 
     if path.exists() {
-        let data = fs::read_to_string(&path)
-            .map_err(|e| format!("Lecture compte impossible: {}", e))?;
+        let data =
+            fs::read_to_string(&path).map_err(|e| format!("Lecture compte impossible: {}", e))?;
         let account = serde_json::from_str::<AccountStore>(&data)
             .map_err(|e| format!("Compte invalide: {}", e))?;
         return Ok(account);
@@ -243,8 +242,7 @@ fn extract_reset_token_from_url(value: &str) -> Option<String> {
         return None;
     }
 
-    let is_reset = url.host_str() == Some("reset")
-        || url.path().trim_start_matches('/') == "reset";
+    let is_reset = url.host_str() == Some("reset") || url.path().trim_start_matches('/') == "reset";
 
     if !is_reset {
         return None;
@@ -442,6 +440,7 @@ async fn scan_source(app: tauri::AppHandle, path: String) -> Result<TreeNode, St
 
     save_source_path(&app, &root_path)?;
     set_current_root(&app, &root_path)?;
+    let sidebar_order = load_app_config(&app)?.sidebar_order;
 
     tauri::async_runtime::spawn_blocking(move || {
         println!("RAW PATH = {:?}", path);
@@ -456,7 +455,7 @@ async fn scan_source(app: tauri::AppHandle, path: String) -> Result<TreeNode, St
         }
 
         if input.is_dir() {
-            build_dir_tree(&input, &cancel_flag)
+            build_dir_tree(&input, &cancel_flag, &sidebar_order)
         } else if is_zip_path(&input) {
             build_zip_tree(&input, &cancel_flag)
         } else {
@@ -484,21 +483,45 @@ async fn load_saved_source(app: tauri::AppHandle) -> Result<Option<SavedSource>,
     let cancel_flag = app.state::<ScanState>().0.clone();
     cancel_flag.store(false, Ordering::Relaxed);
     let tree_path = path.clone();
+    let sidebar_order = load_app_config(&app)?.sidebar_order;
 
     let tree = tauri::async_runtime::spawn_blocking(move || {
         let input = PathBuf::from(&tree_path);
         if input.is_dir() {
-            build_dir_tree(&input, &cancel_flag)
+            build_dir_tree(&input, &cancel_flag, &sidebar_order)
         } else if is_zip_path(&input) {
             build_zip_tree(&input, &cancel_flag)
         } else {
-            Err(format!("Le chemin enregistre n'est ni dossier ni zip: {:?}", tree_path))
+            Err(format!(
+                "Le chemin enregistre n'est ni dossier ni zip: {:?}",
+                tree_path
+            ))
         }
     })
     .await
     .map_err(|e| e.to_string())??;
 
     Ok(Some(SavedSource { path, tree }))
+}
+
+#[tauri::command]
+async fn rescan_current_source(app: tauri::AppHandle) -> Result<TreeNode, String> {
+    let root_path = get_current_root(&app)?;
+    let cancel_flag = app.state::<ScanState>().0.clone();
+    cancel_flag.store(false, Ordering::Relaxed);
+    let sidebar_order = load_app_config(&app)?.sidebar_order;
+
+    tauri::async_runtime::spawn_blocking(move || {
+        if root_path.is_dir() {
+            build_dir_tree(&root_path, &cancel_flag, &sidebar_order)
+        } else if is_zip_path(&root_path) {
+            build_zip_tree(&root_path, &cancel_flag)
+        } else {
+            Err("La racine active n'est ni un dossier ni un zip".to_string())
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -676,7 +699,28 @@ fn open_in_explorer(path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn import_zip(app: tauri::AppHandle, zip_path: String, destination_dir: String) -> Result<String, String> {
+fn open_parent_folder(app: tauri::AppHandle, path: String) -> Result<(), String> {
+    ensure_authenticated(&app)?;
+
+    let target = PathBuf::from(path);
+    let parent = target
+        .parent()
+        .ok_or_else(|| "Impossible de trouver le dossier parent".to_string())?;
+
+    if !parent.exists() || !parent.is_dir() {
+        return Err("Le dossier parent n'existe pas".to_string());
+    }
+
+    tauri_plugin_opener::open_path(parent, None::<&str>)
+        .map_err(|e| format!("Ouverture impossible: {}", e))
+}
+
+#[tauri::command]
+fn import_zip(
+    app: tauri::AppHandle,
+    zip_path: String,
+    destination_dir: String,
+) -> Result<String, String> {
     ensure_authenticated(&app)?;
     let source = PathBuf::from(zip_path);
     if !source.exists() {
@@ -707,6 +751,218 @@ fn import_zip(app: tauri::AppHandle, zip_path: String, destination_dir: String) 
     fs::copy(&source, &target).map_err(|e| format!("Import impossible: {}", e))?;
 
     Ok(target.to_string_lossy().to_string())
+}
+
+fn copy_entry_recursively(source: &Path, target: &Path) -> Result<(), String> {
+    if source.is_dir() {
+        fs::create_dir(target).map_err(|e| format!("Import impossible: {}", e))?;
+        for entry in fs::read_dir(source).map_err(|e| format!("Import impossible: {}", e))? {
+            let entry = entry.map_err(|e| format!("Import impossible: {}", e))?;
+            let child_source = entry.path();
+            let child_target = target.join(entry.file_name());
+            copy_entry_recursively(&child_source, &child_target)?;
+        }
+    } else {
+        fs::copy(source, target).map_err(|e| format!("Import impossible: {}", e))?;
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+fn import_entries(
+    app: tauri::AppHandle,
+    source_paths: Vec<String>,
+    destination_dir: String,
+) -> Result<(), String> {
+    ensure_authenticated(&app)?;
+
+    if source_paths.is_empty() {
+        return Ok(());
+    }
+
+    let destination = PathBuf::from(destination_dir);
+    let destination = ensure_in_root(&app, &destination)?;
+
+    if !destination.is_dir() {
+        return Err("La destination doit etre un dossier".to_string());
+    }
+
+    for source_path in source_paths {
+        let source = PathBuf::from(source_path);
+        if !source.exists() {
+            return Err("Un element depose n'existe pas".to_string());
+        }
+
+        let source = source
+            .canonicalize()
+            .map_err(|e| format!("Impossible de resoudre l'element depose: {}", e))?;
+
+        let file_name = source
+            .file_name()
+            .ok_or_else(|| "Nom d'element invalide".to_string())?;
+
+        let target = destination.join(file_name);
+        let target = ensure_target_in_root(&app, &target)?;
+
+        if target.exists() {
+            return Err(format!(
+                "Un element nomme '{}' existe deja dans la destination",
+                file_name.to_string_lossy()
+            ));
+        }
+
+        let target_parent = target
+            .parent()
+            .ok_or_else(|| "Chemin cible invalide".to_string())?
+            .canonicalize()
+            .map_err(|e| format!("Impossible de resoudre le dossier cible: {}", e))?;
+
+        if source == target || (source.is_dir() && is_subpath(&source, &target_parent)) {
+            return Err("Impossible d'importer un dossier dans lui-meme".to_string());
+        }
+
+        copy_entry_recursively(&source, &target)?;
+    }
+
+    Ok(())
+}
+
+fn zip_entry_name(path: &Path) -> String {
+    path.components()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+fn add_file_to_zip(
+    zip: &mut ZipWriter<File>,
+    source: &Path,
+    archive_path: &Path,
+    options: SimpleFileOptions,
+) -> Result<(), String> {
+    let name = zip_entry_name(archive_path);
+    zip.start_file(name, options)
+        .map_err(|e| format!("Export impossible: {}", e))?;
+
+    let mut input = File::open(source).map_err(|e| format!("Lecture fichier impossible: {}", e))?;
+    let mut buffer = [0u8; 64 * 1024];
+
+    loop {
+        let read = input
+            .read(&mut buffer)
+            .map_err(|e| format!("Lecture fichier impossible: {}", e))?;
+        if read == 0 {
+            break;
+        }
+        zip.write_all(&buffer[..read])
+            .map_err(|e| format!("Ecriture zip impossible: {}", e))?;
+    }
+
+    Ok(())
+}
+
+fn add_directory_to_zip(
+    zip: &mut ZipWriter<File>,
+    root: &Path,
+    current: &Path,
+    archive_root: &Path,
+    options: SimpleFileOptions,
+) -> Result<(), String> {
+    let relative = current
+        .strip_prefix(root)
+        .map_err(|_| "Chemin relatif impossible pendant l'export".to_string())?;
+    let archive_path = archive_root.join(relative);
+
+    if !relative.as_os_str().is_empty() {
+        let mut directory_name = zip_entry_name(&archive_path);
+        if !directory_name.ends_with('/') {
+            directory_name.push('/');
+        }
+        zip.add_directory(directory_name, options)
+            .map_err(|e| format!("Export impossible: {}", e))?;
+    }
+
+    for entry in fs::read_dir(current).map_err(|e| format!("Lecture dossier impossible: {}", e))? {
+        let entry = entry.map_err(|e| format!("Lecture dossier impossible: {}", e))?;
+        let path = entry.path();
+        if path.is_dir() {
+            add_directory_to_zip(zip, root, &path, archive_root, options)?;
+        } else if path.is_file() {
+            let relative = path
+                .strip_prefix(root)
+                .map_err(|_| "Chemin relatif impossible pendant l'export".to_string())?;
+            add_file_to_zip(zip, &path, &archive_root.join(relative), options)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn available_export_path(parent: &Path, base_name: &str) -> PathBuf {
+    let candidate = parent.join(format!("{}_export_eleves.zip", base_name));
+    if !candidate.exists() {
+        return candidate;
+    }
+
+    for index in 2..1000 {
+        let candidate = parent.join(format!("{}_export_eleves_{}.zip", base_name, index));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+
+    parent.join(format!("{}_export_eleves_final.zip", base_name))
+}
+
+fn display_path(path: &Path) -> String {
+    let value = path.to_string_lossy().to_string();
+    value
+        .strip_prefix(r"\\?\")
+        .unwrap_or(&value)
+        .to_string()
+}
+
+#[tauri::command]
+fn export_for_students(app: tauri::AppHandle) -> Result<String, String> {
+    ensure_authenticated(&app)?;
+
+    let root = get_current_root(&app)?
+        .canonicalize()
+        .map_err(|e| format!("Impossible de resoudre le dossier TP: {}", e))?;
+    if !root.is_dir() {
+        return Err("L'export eleve est disponible uniquement pour un dossier TP.".to_string());
+    }
+
+    let root_name = root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "Nom du dossier TP invalide".to_string())?
+        .to_string();
+    let parent = root
+        .parent()
+        .ok_or_else(|| "Impossible de trouver le dossier parent du TP".to_string())?;
+
+    let exe_path =
+        env::current_exe().map_err(|e| format!("Impossible de localiser l'executable: {}", e))?;
+    let exe_name = exe_path
+        .file_name()
+        .ok_or_else(|| "Nom de l'executable invalide".to_string())?;
+
+    let export_path = available_export_path(parent, &root_name);
+    let export_file =
+        File::create(&export_path).map_err(|e| format!("Creation zip impossible: {}", e))?;
+    let mut zip = ZipWriter::new(export_file);
+    let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+
+    add_file_to_zip(&mut zip, &exe_path, Path::new(exe_name), options)?;
+    zip.add_directory(format!("{}/", root_name), options)
+        .map_err(|e| format!("Export impossible: {}", e))?;
+    add_directory_to_zip(&mut zip, &root, &root, Path::new(&root_name), options)?;
+    zip.finish()
+        .map_err(|e| format!("Finalisation zip impossible: {}", e))?;
+
+    Ok(display_path(&export_path))
 }
 
 #[tauri::command]
@@ -813,7 +1069,9 @@ fn move_entry(
     }
 
     if source.is_dir() && is_subpath(&source, &destination) {
-        return Err("Impossible de déplacer un dossier dans lui-même ou un sous-dossier".to_string());
+        return Err(
+            "Impossible de déplacer un dossier dans lui-même ou un sous-dossier".to_string(),
+        );
     }
 
     let file_name = source
@@ -831,6 +1089,31 @@ fn move_entry(
     Ok(())
 }
 
+#[tauri::command]
+fn save_sidebar_order(
+    app: tauri::AppHandle,
+    parent_path: String,
+    child_names: Vec<String>,
+) -> Result<(), String> {
+    ensure_authenticated(&app)?;
+
+    let parent = PathBuf::from(parent_path);
+    let parent = ensure_in_root(&app, &parent)?;
+    if !parent.is_dir() {
+        return Err("Le parent doit Ãªtre un dossier".to_string());
+    }
+
+    for name in &child_names {
+        validate_entry_name(name)?;
+    }
+
+    let mut config = load_app_config(&app)?;
+    config
+        .sidebar_order
+        .insert(parent.to_string_lossy().to_string(), child_names);
+    save_app_config(&app, &config)
+}
+
 fn is_zip_path(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
@@ -846,9 +1129,100 @@ fn check_cancel(cancel_flag: &AtomicBool) -> Result<(), String> {
     }
 }
 
-fn build_dir_tree(path: &Path, cancel_flag: &AtomicBool) -> Result<TreeNode, String> {
+fn append_path_snapshot(root: &Path, current: &Path, output: &mut String) -> Result<(), String> {
+    let metadata =
+        fs::metadata(current).map_err(|e| format!("Lecture metadata impossible: {}", e))?;
+    let relative = current.strip_prefix(root).unwrap_or(current);
+    output.push_str(&relative.to_string_lossy().replace('\\', "/"));
+    output.push('|');
+    output.push_str(if metadata.is_dir() { "d" } else { "f" });
+    output.push('|');
+    output.push_str(&metadata.len().to_string());
+    output.push('|');
+
+    if let Ok(modified) = metadata.modified() {
+        if let Ok(duration) = modified.duration_since(UNIX_EPOCH) {
+            output.push_str(&duration.as_nanos().to_string());
+        }
+    }
+    output.push('\n');
+
+    if metadata.is_dir() {
+        let mut entries = fs::read_dir(current)
+            .map_err(|e| format!("Lecture dossier impossible: {}", e))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("Lecture dossier impossible: {}", e))?;
+        entries.sort_by_key(|entry| entry.path());
+
+        for entry in entries {
+            append_path_snapshot(root, &entry.path(), output)?;
+        }
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+fn get_source_snapshot(app: tauri::AppHandle) -> Result<String, String> {
+    let root = get_current_root(&app)?
+        .canonicalize()
+        .map_err(|e| format!("Impossible de resoudre la racine: {}", e))?;
+
+    if !root.is_dir() {
+        return Ok(root.to_string_lossy().to_string());
+    }
+
+    let mut snapshot = String::new();
+    append_path_snapshot(&root, &root, &mut snapshot)?;
+    Ok(snapshot)
+}
+
+fn sort_children_for_dir(
+    path: &Path,
+    children: &mut Vec<TreeNode>,
+    sidebar_order: &HashMap<String, Vec<String>>,
+) {
+    children.sort_by(|a, b| {
+        b.is_dir
+            .cmp(&a.is_dir)
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+
+    let key = path.to_string_lossy().to_string();
+    let Some(order) = sidebar_order.get(&key) else {
+        return;
+    };
+
+    let positions: HashMap<&str, usize> = order
+        .iter()
+        .enumerate()
+        .map(|(index, name)| (name.as_str(), index))
+        .collect();
+
+    children.sort_by(|a, b| {
+        match (
+            positions.get(a.name.as_str()),
+            positions.get(b.name.as_str()),
+        ) {
+            (Some(a_index), Some(b_index)) => a_index.cmp(b_index),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => b
+                .is_dir
+                .cmp(&a.is_dir)
+                .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())),
+        }
+    });
+}
+
+fn build_dir_tree(
+    path: &Path,
+    cancel_flag: &AtomicBool,
+    sidebar_order: &HashMap<String, Vec<String>>,
+) -> Result<TreeNode, String> {
     check_cancel(cancel_flag)?;
-    let name = path.file_name()
+    let name = path
+        .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or_else(|| path.to_str().unwrap_or("root"))
         .to_string();
@@ -863,7 +1237,7 @@ fn build_dir_tree(path: &Path, cancel_flag: &AtomicBool) -> Result<TreeNode, Str
         let metadata = entry.metadata().map_err(|e| e.to_string())?;
 
         if metadata.is_dir() {
-            children.push(build_dir_tree(&entry_path, cancel_flag)?);
+            children.push(build_dir_tree(&entry_path, cancel_flag, sidebar_order)?);
         } else {
             let file_name = entry.file_name().to_string_lossy().to_string();
             let is_zip = is_zip_path(&entry_path);
@@ -879,9 +1253,7 @@ fn build_dir_tree(path: &Path, cancel_flag: &AtomicBool) -> Result<TreeNode, Str
         }
     }
 
-    children.sort_by(|a, b| {
-        b.is_dir.cmp(&a.is_dir).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
-    });
+    sort_children_for_dir(path, &mut children, sidebar_order);
 
     let mut node = TreeNode {
         name,
@@ -895,7 +1267,6 @@ fn build_dir_tree(path: &Path, cancel_flag: &AtomicBool) -> Result<TreeNode, Str
     set_index_paths_from_children(&mut node);
     Ok(node)
 }
-
 
 #[tauri::command]
 async fn resolve_zip_index(
@@ -981,7 +1352,8 @@ fn build_zip_tree(path: &Path, cancel_flag: &AtomicBool) -> Result<TreeNode, Str
     let file = File::open(path).map_err(|e| e.to_string())?;
     let mut archive = ZipArchive::new(file).map_err(|e| e.to_string())?;
 
-    let root_name = path.file_name()
+    let root_name = path
+        .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("archive.zip")
         .to_string();
@@ -1016,7 +1388,8 @@ fn build_zip_tree(path: &Path, cancel_flag: &AtomicBool) -> Result<TreeNode, Str
     }
 
     check_cancel(cancel_flag)?;
-    root.index_path = extracted_index_path.or_else(|| find_index_html_recursive(&extract_root, cancel_flag));
+    root.index_path =
+        extracted_index_path.or_else(|| find_index_html_recursive(&extract_root, cancel_flag));
     set_index_paths_from_children(&mut root);
     sort_tree(&mut root);
     Ok(root)
@@ -1059,7 +1432,9 @@ fn insert_zip_entry(root: &mut TreeNode, entry_path: &str) {
 fn sort_tree(node: &mut TreeNode) {
     node.children.iter_mut().for_each(sort_tree);
     node.children.sort_by(|a, b| {
-        b.is_dir.cmp(&a.is_dir).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+        b.is_dir
+            .cmp(&a.is_dir)
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
     });
 }
 
@@ -1153,9 +1528,11 @@ fn extract_zip_to_temp(zip_path: &Path, cancel_flag: &AtomicBool) -> Result<Path
 fn set_index_paths_from_children(node: &mut TreeNode) {
     if node.is_dir {
         if node.index_path.is_none() {
-            if let Some(child) = node.children.iter().find(|child| {
-                !child.is_dir && child.name.eq_ignore_ascii_case("index.html")
-            }) {
+            if let Some(child) = node
+                .children
+                .iter()
+                .find(|child| !child.is_dir && child.name.eq_ignore_ascii_case("index.html"))
+            {
                 node.index_path = Some(child.path.clone());
             }
         }
@@ -1210,185 +1587,192 @@ pub fn run() {
             }
             Ok(())
         })
-    .manage(PreviewRoots(Mutex::new(HashMap::new())))
-    .manage(ScanState(Arc::new(AtomicBool::new(false))))
-    .manage(CurrentRootState(Mutex::new(None)))
-    .manage(ZipCacheState(Mutex::new(HashMap::new())))
-    .manage(AuthState(Mutex::new(false)))
+        .manage(PreviewRoots(Mutex::new(HashMap::new())))
+        .manage(ScanState(Arc::new(AtomicBool::new(false))))
+        .manage(CurrentRootState(Mutex::new(None)))
+        .manage(ZipCacheState(Mutex::new(HashMap::new())))
+        .manage(AuthState(Mutex::new(false)))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
-    .invoke_handler(tauri::generate_handler![
-        scan_source,
-        load_saved_source,
-        forget_saved_source,
-        open_preview,
-        prepare_preview,
-        prepare_preview_http, // <-- add
-        cancel_scan,
-        open_in_explorer,
-        resolve_zip_index,
-        import_zip,
-        login,
-        logout,
-        get_account_profile,
-        update_account_profile,
-        take_initial_reset_token,
-        request_password_reset,
-        reset_password_with_token,
-        create_folder,
-        rename_entry,
-        delete_entry,
-        move_entry
-    ])
+        .invoke_handler(tauri::generate_handler![
+            scan_source,
+            load_saved_source,
+            rescan_current_source,
+            get_source_snapshot,
+            forget_saved_source,
+            open_preview,
+            prepare_preview,
+            prepare_preview_http, // <-- add
+            cancel_scan,
+            open_in_explorer,
+            open_parent_folder,
+            resolve_zip_index,
+            import_zip,
+            import_entries,
+            export_for_students,
+            login,
+            logout,
+            get_account_profile,
+            update_account_profile,
+            take_initial_reset_token,
+            request_password_reset,
+            reset_password_with_token,
+            create_folder,
+            rename_entry,
+            delete_entry,
+            move_entry,
+            save_sidebar_order
+        ])
         // Ajoute ceci pour servir les fichiers locaux
         .register_uri_scheme_protocol("asset", |app, request| {
-    use tauri::http::header::CONTENT_TYPE;
-    use tauri::http::Response;
+            use tauri::http::header::CONTENT_TYPE;
+            use tauri::http::Response;
 
-    let decoded_path = urlencoding::decode(request.uri().path())
-        .map(|p| p.to_string())
-        .unwrap_or_default();
+            let decoded_path = urlencoding::decode(request.uri().path())
+                .map(|p| p.to_string())
+                .unwrap_or_default();
 
-    let trimmed = decoded_path.trim_start_matches('/');
-    let mut parts = trimmed.splitn(2, '/');
+            let trimmed = decoded_path.trim_start_matches('/');
+            let mut parts = trimmed.splitn(2, '/');
 
-    let preview_id = match parts.next() {
-        Some(id) if !id.is_empty() => id,
-        _ => {
-            return Response::builder()
-                .status(400)
-                .header(CONTENT_TYPE, "text/plain; charset=utf-8")
-                .body(b"Missing preview id".to_vec())
-                .unwrap();
-        }
-    };
-
-    let relative_path = match parts.next() {
-        Some(path) if !path.is_empty() => path,
-        _ => {
-            return Response::builder()
-                .status(400)
-                .header(CONTENT_TYPE, "text/plain; charset=utf-8")
-                .body(b"Missing relative path".to_vec())
-                .unwrap();
-        }
-    };
-
-    let root = {
-        let state = app.app_handle().state::<PreviewRoots>();
-        let roots = match state.0.lock() {
-            Ok(roots) => roots,
-            Err(_) => {
-                return Response::builder()
-                    .status(500)
-                    .header(CONTENT_TYPE, "text/plain; charset=utf-8")
-                    .body(b"Preview state lock error".to_vec())
-                    .unwrap();
-            }
-        };
-
-        match roots.get(preview_id) {
-            Some(root) => root.clone(),
-            None => {
-                return Response::builder()
-                    .status(404)
-                    .header(CONTENT_TYPE, "text/plain; charset=utf-8")
-                    .body(b"Preview root not found".to_vec())
-                    .unwrap();
-            }
-        }
-    };
-
-    let mut resolved_path = root.join(relative_path);
-
-    if !resolved_path.exists() {
-        if let Some(found) = resolve_case_insensitive(&root, relative_path) {
-            resolved_path = found;
-        }
-    }
-
-    let root_canonical = root.canonicalize().ok();
-    let resolved_canonical = resolved_path.canonicalize().ok();
-
-    if let (Some(root_can), Some(resolved_can)) = (root_canonical, resolved_canonical) {
-        if !resolved_can.starts_with(&root_can) {
-            return Response::builder()
-                .status(403)
-                .header(CONTENT_TYPE, "text/plain; charset=utf-8")
-                .body(b"Forbidden".to_vec())
-                .unwrap();
-        }
-    }
-
-    if resolved_path.is_dir() {
-        resolved_path = resolved_path.join("index.html");
-    }
-
-    let path_lower = resolved_path.to_string_lossy().to_lowercase();
-
-    match std::fs::read(&resolved_path) {
-        Ok(bytes) => {
-            let content_type = if path_lower.ends_with(".html") || path_lower.ends_with(".htm") {
-                "text/html; charset=utf-8"
-            } else if path_lower.ends_with(".css") {
-                "text/css; charset=utf-8"
-            } else if path_lower.ends_with(".js") {
-                "text/javascript; charset=utf-8"
-            } else if path_lower.ends_with(".png") {
-                "image/png"
-            } else if path_lower.ends_with(".jpg") || path_lower.ends_with(".jpeg") {
-                "image/jpeg"
-            } else if path_lower.ends_with(".svg") {
-                "image/svg+xml"
-            } else if path_lower.ends_with(".gif") {
-                "image/gif"
-            } else if path_lower.ends_with(".webp") {
-                "image/webp"
-            } else if path_lower.ends_with(".ico") {
-                "image/x-icon"
-            } else if path_lower.ends_with(".json") {
-                "application/json"
-            } else if path_lower.ends_with(".wasm") {
-                "application/wasm"
-            } else if path_lower.ends_with(".glb") {
-                "model/gltf-binary"
-            } else if path_lower.ends_with(".gltf") {
-                "model/gltf+json"
-            } else if path_lower.ends_with(".bin") {
-                "application/octet-stream"
-            } else if path_lower.ends_with(".woff") {
-                "font/woff"
-            } else if path_lower.ends_with(".woff2") {
-                "font/woff2"
-            } else if path_lower.ends_with(".ttf") {
-                "font/ttf"
-            } else if path_lower.ends_with(".otf") {
-                "font/otf"
-            } else if path_lower.ends_with(".mp4") {
-                "video/mp4"
-            } else if path_lower.ends_with(".webm") {
-                "video/webm"
-            } else if path_lower.ends_with(".mp3") {
-                "audio/mpeg"
-            } else if path_lower.ends_with(".pdf") {
-                "application/pdf"
-            } else {
-                "application/octet-stream"
+            let preview_id = match parts.next() {
+                Some(id) if !id.is_empty() => id,
+                _ => {
+                    return Response::builder()
+                        .status(400)
+                        .header(CONTENT_TYPE, "text/plain; charset=utf-8")
+                        .body(b"Missing preview id".to_vec())
+                        .unwrap();
+                }
             };
 
-            Response::builder()
-                .status(200)
-                .header(CONTENT_TYPE, content_type)
-                .body(bytes)
-                .unwrap()
-        }
-        Err(_) => Response::builder()
-            .status(404)
-            .header(CONTENT_TYPE, "text/plain; charset=utf-8")
-            .body(b"Not found".to_vec())
-            .unwrap(),
-    }
-})
+            let relative_path = match parts.next() {
+                Some(path) if !path.is_empty() => path,
+                _ => {
+                    return Response::builder()
+                        .status(400)
+                        .header(CONTENT_TYPE, "text/plain; charset=utf-8")
+                        .body(b"Missing relative path".to_vec())
+                        .unwrap();
+                }
+            };
+
+            let root = {
+                let state = app.app_handle().state::<PreviewRoots>();
+                let roots = match state.0.lock() {
+                    Ok(roots) => roots,
+                    Err(_) => {
+                        return Response::builder()
+                            .status(500)
+                            .header(CONTENT_TYPE, "text/plain; charset=utf-8")
+                            .body(b"Preview state lock error".to_vec())
+                            .unwrap();
+                    }
+                };
+
+                match roots.get(preview_id) {
+                    Some(root) => root.clone(),
+                    None => {
+                        return Response::builder()
+                            .status(404)
+                            .header(CONTENT_TYPE, "text/plain; charset=utf-8")
+                            .body(b"Preview root not found".to_vec())
+                            .unwrap();
+                    }
+                }
+            };
+
+            let mut resolved_path = root.join(relative_path);
+
+            if !resolved_path.exists() {
+                if let Some(found) = resolve_case_insensitive(&root, relative_path) {
+                    resolved_path = found;
+                }
+            }
+
+            let root_canonical = root.canonicalize().ok();
+            let resolved_canonical = resolved_path.canonicalize().ok();
+
+            if let (Some(root_can), Some(resolved_can)) = (root_canonical, resolved_canonical) {
+                if !resolved_can.starts_with(&root_can) {
+                    return Response::builder()
+                        .status(403)
+                        .header(CONTENT_TYPE, "text/plain; charset=utf-8")
+                        .body(b"Forbidden".to_vec())
+                        .unwrap();
+                }
+            }
+
+            if resolved_path.is_dir() {
+                resolved_path = resolved_path.join("index.html");
+            }
+
+            let path_lower = resolved_path.to_string_lossy().to_lowercase();
+
+            match std::fs::read(&resolved_path) {
+                Ok(bytes) => {
+                    let content_type =
+                        if path_lower.ends_with(".html") || path_lower.ends_with(".htm") {
+                            "text/html; charset=utf-8"
+                        } else if path_lower.ends_with(".css") {
+                            "text/css; charset=utf-8"
+                        } else if path_lower.ends_with(".js") {
+                            "text/javascript; charset=utf-8"
+                        } else if path_lower.ends_with(".png") {
+                            "image/png"
+                        } else if path_lower.ends_with(".jpg") || path_lower.ends_with(".jpeg") {
+                            "image/jpeg"
+                        } else if path_lower.ends_with(".svg") {
+                            "image/svg+xml"
+                        } else if path_lower.ends_with(".gif") {
+                            "image/gif"
+                        } else if path_lower.ends_with(".webp") {
+                            "image/webp"
+                        } else if path_lower.ends_with(".ico") {
+                            "image/x-icon"
+                        } else if path_lower.ends_with(".json") {
+                            "application/json"
+                        } else if path_lower.ends_with(".wasm") {
+                            "application/wasm"
+                        } else if path_lower.ends_with(".glb") {
+                            "model/gltf-binary"
+                        } else if path_lower.ends_with(".gltf") {
+                            "model/gltf+json"
+                        } else if path_lower.ends_with(".bin") {
+                            "application/octet-stream"
+                        } else if path_lower.ends_with(".woff") {
+                            "font/woff"
+                        } else if path_lower.ends_with(".woff2") {
+                            "font/woff2"
+                        } else if path_lower.ends_with(".ttf") {
+                            "font/ttf"
+                        } else if path_lower.ends_with(".otf") {
+                            "font/otf"
+                        } else if path_lower.ends_with(".mp4") {
+                            "video/mp4"
+                        } else if path_lower.ends_with(".webm") {
+                            "video/webm"
+                        } else if path_lower.ends_with(".mp3") {
+                            "audio/mpeg"
+                        } else if path_lower.ends_with(".pdf") {
+                            "application/pdf"
+                        } else {
+                            "application/octet-stream"
+                        };
+
+                    Response::builder()
+                        .status(200)
+                        .header(CONTENT_TYPE, content_type)
+                        .body(bytes)
+                        .unwrap()
+                }
+                Err(_) => Response::builder()
+                    .status(404)
+                    .header(CONTENT_TYPE, "text/plain; charset=utf-8")
+                    .body(b"Not found".to_vec())
+                    .unwrap(),
+            }
+        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
@@ -1462,10 +1846,9 @@ async fn request_password_reset(app: tauri::AppHandle, email: String) -> Result<
     });
     save_account(&app, &account)?;
 
-    let api_key = env::var("RESEND_API_KEY")
-        .map_err(|_| "RESEND_API_KEY manquant".to_string())?;
-    let from = env::var("RESEND_FROM")
-        .unwrap_or_else(|_| "TP Browser <no-reply@xenox.fr>".to_string());
+    let api_key = env::var("RESEND_API_KEY").map_err(|_| "RESEND_API_KEY manquant".to_string())?;
+    let from =
+        env::var("RESEND_FROM").unwrap_or_else(|_| "TP Browser <no-reply@xenox.fr>".to_string());
     let app_link = format!("tp-browser://reset?token={}", token);
     let action_link = build_reset_action_link(&token);
 

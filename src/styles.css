@@ -94,7 +94,8 @@ input {
 
 /* Assure-toi que les enfants disparaissent aussi */
 .shell.sidebar-collapsed .sidebar-header,
-.shell.sidebar-collapsed .tree-root {
+.shell.sidebar-collapsed .tree-root,
+.shell.sidebar-collapsed .sidebar-logo {
   display: none;
 }
 
@@ -154,9 +155,23 @@ input {
 }
 
 .tree-root {
+  flex: 1;
   padding: 12px;
   overflow: auto;
   min-height: 0;
+}
+
+.sidebar-logo {
+  flex: 0 0 auto;
+  padding: 12px 18px 16px;
+  border-top: 1px solid var(--border);
+}
+
+.sidebar-logo img {
+  display: block;
+  width: 100%;
+  max-height: 96px;
+  object-fit: contain;
 }
 
 .viewer {
@@ -175,6 +190,7 @@ input {
   width: 64px;
   height: 64px;
   z-index: 6;
+  pointer-events: none;
 }
 
 .shell.viewer-fullscreen .topbar,
@@ -221,7 +237,7 @@ input {
   transition: opacity 0.15s ease;
 }
 
-.shell.viewer-fullscreen .viewer-hover-zone:hover .exit-fullscreen-btn {
+.shell.viewer-fullscreen .viewer:hover .exit-fullscreen-btn {
   opacity: 1;
   pointer-events: auto;
 }
@@ -588,8 +604,12 @@ pre {
   border-radius: 8px;
   font-size: 13px;
 }
-.tree-row {
-  -webkit-user-drag: element;
+
+.tree-row,
+.tree-row * {
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-user-drag: none;
 }
 
 .tree-row.dragging {
@@ -599,6 +619,30 @@ pre {
 .tree-row.drop-target {
   outline: 1px solid rgba(90, 160, 255, 0.9);
   background: rgba(90, 160, 255, 0.12);
+}
+
+.tree-row.drop-before,
+.tree-row.drop-after {
+  position: relative;
+}
+
+.tree-row.drop-before::before,
+.tree-row.drop-after::after {
+  content: "";
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  height: 2px;
+  border-radius: 999px;
+  background: rgba(90, 160, 255, 0.95);
+}
+
+.tree-row.drop-before::before {
+  top: -3px;
+}
+
+.tree-row.drop-after::after {
+  bottom: -3px;
 }
 
 .icon-btn[disabled],
