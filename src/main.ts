@@ -300,7 +300,11 @@ async function renderEmbeddedPreview(indexPath: string, requestId?: number) {
   let previewUrl: string;
 
   try {
-    previewUrl = await invoke<string>("prepare_preview", { indexPath });
+    const isWindows = navigator.userAgent.toLowerCase().includes("windows");
+    previewUrl = await invoke<string>(
+      isWindows ? "prepare_preview_http" : "prepare_preview",
+      { indexPath }
+    );
   } catch (error) {
     setViewerEmbedded(false, requestId);
     setViewerHtml(`

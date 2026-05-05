@@ -54,6 +54,24 @@ fn new_preview_id() -> Result<String, String> {
     Ok(format!("preview-{}", timestamp))
 }
 
+fn build_preview_asset_url(preview_id: &str, relative_path: &str) -> String {
+    format!(
+        "asset://localhost/{}/{}",
+        preview_id,
+        encode_asset_path(relative_path)
+    )
+}
+
+fn build_preview_http_url(preview_id: &str, relative_path: &str) -> String {
+    // WebView2 accepts http(s) iframe URLs. For custom schemes on Windows, Wry maps
+    // the scheme to http://<scheme>.localhost.
+    format!(
+        "http://asset.localhost/{}/{}",
+        preview_id,
+        encode_asset_path(relative_path)
+    )
+}
+
 fn encode_asset_path(path: &str) -> String {
     path.split('/')
         .map(|segment| urlencoding::encode(segment).to_string())
@@ -243,7 +261,6 @@ fn prepare_preview(app: tauri::AppHandle, index_path: String) -> Result<String, 
     if !path.exists() {
         return Err(format!("Le fichier n'existe pas: {}", index_path));
     }
-
     if !path.is_file() {
         return Err("Le chemin doit pointer vers un fichier".into());
     }
@@ -268,11 +285,43 @@ fn prepare_preview(app: tauri::AppHandle, index_path: String) -> Result<String, 
 
     roots.insert(preview_id.clone(), parent);
 
-    Ok(format!(
-        "asset://localhost/{}/{}",
-        preview_id,
-        urlencoding::encode(filename)
-    ))
+    Ok(build_preview_asset_url(&preview_id, filename))
+}
+
+#[tauri::command]
+fn prepare_preview_http(app: tauri::AppHandle, index_path: String) -> Result<String, String> {
+    let path = PathBuf::from(&index_path);
+
+    if !path.exists() {
+        return Err(format!("Le fichier n'existe pas: {}", index_path));
+    }
+    if !path.is_file() {
+        return Err("Le chemin doit pointer vers un fichier".into());
+    }
+
+    let parent = path
+        .parent()
+        .ok_or_else(|| "Impossible de trouver le dossier parent".to_string())?
+        .to_path_buf();
+
+    let filename = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "Nom de fichier invalide".to_string())?;
+
+    let preview_id = new_preview_id()?;
+
+    // reuse same roots map
+    let state = app.state::<PreviewRoots>();
+    let mut roots = state
+        .0
+        .lock()
+        .map_err(|_| "État de preview verrouillé".to_string())?;
+
+    roots.insert(preview_id.clone(), parent);
+
+    // Important: use a normal http URL so WebView2 iframe works on Windows.
+    Ok(build_preview_http_url(&preview_id, filename))
 }
 
 #[tauri::command]
@@ -602,13 +651,15 @@ async fn resolve_zip_index(
 
                 roots.insert(preview_id.clone(), entry.root.clone());
 
-                return Ok(entry.index_relative.as_ref().map(|relative| {
-                    format!(
-                        "asset://localhost/{}/{}",
-                        preview_id,
-                        encode_asset_path(relative)
-                    )
-                }));
+                let preview_url = entry.index_relative.as_ref().map(|relative| {
+                    if cfg!(windows) {
+                        build_preview_http_url(&preview_id, relative)
+                    } else {
+                        build_preview_asset_url(&preview_id, relative)
+                    }
+                });
+
+                return Ok(preview_url);
             }
         }
 
@@ -651,11 +702,11 @@ async fn resolve_zip_index(
 
         roots.insert(preview_id.clone(), extract_root);
 
-        Ok(Some(format!(
-            "asset://localhost/{}/{}",
-            preview_id,
-            encode_asset_path(&relative_str)
-        )))
+        Ok(Some(if cfg!(windows) {
+            build_preview_http_url(&preview_id, &relative_str)
+        } else {
+            build_preview_asset_url(&preview_id, &relative_str)
+        }))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -874,20 +925,21 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
     .invoke_handler(tauri::generate_handler![
-    scan_source,
-    open_preview,
-    prepare_preview,
-    cancel_scan,
-    open_in_explorer,
-    resolve_zip_index,
-    import_zip,
-    login,
-    logout,
-    create_folder,
-    rename_entry,
-    delete_entry,
-    move_entry
-])
+        scan_source,
+        open_preview,
+        prepare_preview,
+        prepare_preview_http, // <-- add
+        cancel_scan,
+        open_in_explorer,
+        resolve_zip_index,
+        import_zip,
+        login,
+        logout,
+        create_folder,
+        rename_entry,
+        delete_entry,
+        move_entry
+    ])
         // Ajoute ceci pour servir les fichiers locaux
         .register_uri_scheme_protocol("asset", |app, request| {
     use tauri::http::header::CONTENT_TYPE;
