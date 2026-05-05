@@ -1,5 +1,10 @@
-use argon2::{Argon2, PasswordHash, PasswordVerifier};
-use serde::Serialize;
+use argon2::{password_hash::SaltString, Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine;
+use rand_core::{OsRng, RngCore};
+use reqwest::Client;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::env;
 use std::fs;
@@ -8,7 +13,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
-use tauri::{Manager, Url, WebviewUrl, WebviewWindowBuilder};
+use tauri::{Emitter, Manager, Url, WebviewUrl, WebviewWindowBuilder};
+use tauri_plugin_deep_link::DeepLinkExt;
 use zip::ZipArchive;
 
 #[derive(Debug, Serialize, Clone)]
@@ -22,11 +28,54 @@ struct TreeNode {
     children: Vec<TreeNode>,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct AccountProfile {
+    username: String,
+    email: String,
+    password_hash: String,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct AccountPublic {
+    username: String,
+    email: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct ResetState {
+    token_hash: String,
+    expires_at: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct AccountStore {
+    profile: AccountProfile,
+    reset: Option<ResetState>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct AppConfig {
+    source_path: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SavedSource {
+    path: String,
+    tree: TreeNode,
+}
+
 struct PreviewRoots(Mutex<HashMap<String, PathBuf>>);
 struct ScanState(Arc<AtomicBool>);
 struct ZipCacheState(Mutex<HashMap<String, ZipCacheEntry>>);
 struct CurrentRootState(Mutex<Option<PathBuf>>);
 struct AuthState(Mutex<bool>);
+struct InitialResetTokenState(Mutex<Option<String>>);
 
 struct ZipCacheEntry {
     root: PathBuf,
@@ -42,6 +91,12 @@ fn get_admin_username() -> Result<String, String> {
 fn get_admin_password_hash() -> Result<String, String> {
     env::var("ADMIN_PASSWORD_HASH").map_err(|_| {
         "ADMIN_PASSWORD_HASH manquant dans le fichier .env".to_string()
+    })
+}
+
+fn get_admin_email() -> Result<String, String> {
+    env::var("ADMIN_EMAIL").map_err(|_| {
+        "ADMIN_EMAIL manquant dans le fichier .env".to_string()
     })
 }
 
@@ -69,6 +124,163 @@ fn build_preview_http_url(preview_id: &str, relative_path: &str) -> String {
         "http://asset.localhost/{}/{}",
         preview_id,
         encode_asset_path(relative_path)
+    )
+}
+
+fn account_file_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|_| "Impossible de trouver le dossier AppData".to_string())?;
+    fs::create_dir_all(&dir).map_err(|e| format!("AppData inaccessible: {}", e))?;
+    Ok(dir.join("account.json"))
+}
+
+fn config_file_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|_| "Impossible de trouver le dossier AppData".to_string())?;
+    fs::create_dir_all(&dir).map_err(|e| format!("AppData inaccessible: {}", e))?;
+    Ok(dir.join("config.json"))
+}
+
+fn load_app_config(app: &tauri::AppHandle) -> Result<AppConfig, String> {
+    let path = config_file_path(app)?;
+    if !path.exists() {
+        return Ok(AppConfig::default());
+    }
+
+    let data = fs::read_to_string(&path)
+        .map_err(|e| format!("Lecture config impossible: {}", e))?;
+    serde_json::from_str::<AppConfig>(&data)
+        .map_err(|e| format!("Config invalide: {}", e))
+}
+
+fn save_app_config(app: &tauri::AppHandle, config: &AppConfig) -> Result<(), String> {
+    let path = config_file_path(app)?;
+    let data = serde_json::to_string_pretty(config)
+        .map_err(|e| format!("Serialisation config impossible: {}", e))?;
+    fs::write(path, data).map_err(|e| format!("Ecriture config impossible: {}", e))?;
+    Ok(())
+}
+
+fn save_source_path(app: &tauri::AppHandle, path: &Path) -> Result<(), String> {
+    let canonical = path
+        .canonicalize()
+        .map_err(|e| format!("Impossible de resoudre le dossier TP: {}", e))?;
+
+    let mut config = load_app_config(app)?;
+    config.source_path = Some(canonical.to_string_lossy().to_string());
+    save_app_config(app, &config)
+}
+
+fn load_account(app: &tauri::AppHandle) -> Result<AccountStore, String> {
+    let path = account_file_path(app)?;
+
+    if path.exists() {
+        let data = fs::read_to_string(&path)
+            .map_err(|e| format!("Lecture compte impossible: {}", e))?;
+        let account = serde_json::from_str::<AccountStore>(&data)
+            .map_err(|e| format!("Compte invalide: {}", e))?;
+        return Ok(account);
+    }
+
+    let profile = AccountProfile {
+        username: get_admin_username()?,
+        email: get_admin_email()?,
+        password_hash: get_admin_password_hash()?,
+    };
+
+    let account = AccountStore {
+        profile,
+        reset: None,
+    };
+
+    save_account(app, &account)?;
+    Ok(account)
+}
+
+fn save_account(app: &tauri::AppHandle, account: &AccountStore) -> Result<(), String> {
+    let path = account_file_path(app)?;
+    let data = serde_json::to_string_pretty(account)
+        .map_err(|e| format!("Serialisation compte impossible: {}", e))?;
+    fs::write(path, data).map_err(|e| format!("Ecriture compte impossible: {}", e))?;
+    Ok(())
+}
+
+fn hash_password_value(value: &str) -> Result<String, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err("Le mot de passe ne peut pas etre vide".to_string());
+    }
+
+    let salt = SaltString::generate(&mut OsRng);
+    let hash = Argon2::default()
+        .hash_password(trimmed.as_bytes(), &salt)
+        .map_err(|_| "Hash du mot de passe impossible".to_string())?
+        .to_string();
+
+    Ok(hash)
+}
+
+fn generate_reset_token() -> String {
+    let mut bytes = [0u8; 32];
+    OsRng.fill_bytes(&mut bytes);
+    URL_SAFE_NO_PAD.encode(bytes)
+}
+
+fn hash_reset_token(token: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(token.as_bytes());
+    let digest = hasher.finalize();
+    URL_SAFE_NO_PAD.encode(digest)
+}
+
+fn extract_reset_token_from_url(value: &str) -> Option<String> {
+    let url = Url::parse(value).ok()?;
+    if url.scheme() != "tp-browser" {
+        return None;
+    }
+
+    let is_reset = url.host_str() == Some("reset")
+        || url.path().trim_start_matches('/') == "reset";
+
+    if !is_reset {
+        return None;
+    }
+
+    url.query_pairs()
+        .find_map(|(key, value)| (key == "token").then(|| value.to_string()))
+}
+
+fn extract_reset_token_from_args() -> Option<String> {
+    for arg in env::args().skip(1) {
+        if let Some(token) = extract_reset_token_from_url(&arg) {
+            return Some(token);
+        }
+    }
+
+    None
+}
+
+fn build_reset_action_link(token: &str) -> String {
+    let app_link = format!("tp-browser://reset?token={}", token);
+    let Ok(base_url) = env::var("RESET_LINK_BASE_URL") else {
+        return app_link;
+    };
+
+    let trimmed_base = base_url.trim();
+    if trimmed_base.is_empty() {
+        return app_link;
+    }
+
+    let separator = if trimmed_base.contains('?') { "&" } else { "?" };
+    format!(
+        "{}{}token={}",
+        trimmed_base,
+        separator,
+        urlencoding::encode(token)
     )
 }
 
@@ -228,6 +440,7 @@ async fn scan_source(app: tauri::AppHandle, path: String) -> Result<TreeNode, St
         return Err(format!("Le chemin n'existe pas: {:?}", path));
     }
 
+    save_source_path(&app, &root_path)?;
     set_current_root(&app, &root_path)?;
 
     tauri::async_runtime::spawn_blocking(move || {
@@ -252,6 +465,58 @@ async fn scan_source(app: tauri::AppHandle, path: String) -> Result<TreeNode, St
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn load_saved_source(app: tauri::AppHandle) -> Result<Option<SavedSource>, String> {
+    let config = load_app_config(&app)?;
+    let Some(path) = config.source_path else {
+        return Ok(None);
+    };
+
+    let root_path = PathBuf::from(&path);
+    if !root_path.exists() {
+        return Err(format!("Le dossier TP enregistre n'existe plus: {}", path));
+    }
+
+    set_current_root(&app, &root_path)?;
+
+    let cancel_flag = app.state::<ScanState>().0.clone();
+    cancel_flag.store(false, Ordering::Relaxed);
+    let tree_path = path.clone();
+
+    let tree = tauri::async_runtime::spawn_blocking(move || {
+        let input = PathBuf::from(&tree_path);
+        if input.is_dir() {
+            build_dir_tree(&input, &cancel_flag)
+        } else if is_zip_path(&input) {
+            build_zip_tree(&input, &cancel_flag)
+        } else {
+            Err(format!("Le chemin enregistre n'est ni dossier ni zip: {:?}", tree_path))
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+
+    Ok(Some(SavedSource { path, tree }))
+}
+
+#[tauri::command]
+fn forget_saved_source(app: tauri::AppHandle) -> Result<(), String> {
+    ensure_authenticated(&app)?;
+
+    let mut config = load_app_config(&app)?;
+    config.source_path = None;
+    save_app_config(&app, &config)?;
+
+    let state = app.state::<CurrentRootState>();
+    let mut current = state
+        .0
+        .lock()
+        .map_err(|_| "Etat racine verrouille".to_string())?;
+    *current = None;
+
+    Ok(())
 }
 
 #[tauri::command]
@@ -360,13 +625,12 @@ fn cancel_scan(app: tauri::AppHandle) {
 
 #[tauri::command]
 fn login(app: tauri::AppHandle, username: String, password: String) -> Result<bool, String> {
-    let expected_username = get_admin_username()?;
-    if username != expected_username {
+    let account = load_account(&app)?;
+    if username != account.profile.username {
         return Ok(false);
     }
 
-    let hash = get_admin_password_hash()?;
-    let parsed = PasswordHash::new(&hash)
+    let parsed = PasswordHash::new(&account.profile.password_hash)
         .map_err(|_| "Hash de mot de passe invalide".to_string())?;
 
     if Argon2::default()
@@ -916,7 +1180,36 @@ pub fn run() {
             }
         }
     }
+    let initial_reset_token = extract_reset_token_from_args();
+
     tauri::Builder::default()
+        .plugin(tauri_plugin_deep_link::init())
+        .manage(InitialResetTokenState(Mutex::new(initial_reset_token)))
+        .setup(|app| {
+            #[cfg(any(windows, target_os = "linux"))]
+            app.deep_link().register_all()?;
+
+            let app_handle = app.handle().clone();
+            app.deep_link().on_open_url(move |event| {
+                for url in event.urls() {
+                    if let Some(token) = extract_reset_token_from_url(url.as_str()) {
+                        let _ = app_handle.emit("reset_link", token);
+                        break;
+                    }
+                }
+            });
+
+            if let Some(token) = app
+                .state::<InitialResetTokenState>()
+                .0
+                .lock()
+                .ok()
+                .and_then(|token| token.clone())
+            {
+                let _ = app.emit("reset_link", token);
+            }
+            Ok(())
+        })
     .manage(PreviewRoots(Mutex::new(HashMap::new())))
     .manage(ScanState(Arc::new(AtomicBool::new(false))))
     .manage(CurrentRootState(Mutex::new(None)))
@@ -926,6 +1219,8 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
     .invoke_handler(tauri::generate_handler![
         scan_source,
+        load_saved_source,
+        forget_saved_source,
         open_preview,
         prepare_preview,
         prepare_preview_http, // <-- add
@@ -935,6 +1230,11 @@ pub fn run() {
         import_zip,
         login,
         logout,
+        get_account_profile,
+        update_account_profile,
+        take_initial_reset_token,
+        request_password_reset,
+        reset_password_with_token,
         create_folder,
         rename_entry,
         delete_entry,
@@ -1091,4 +1391,161 @@ pub fn run() {
 })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[tauri::command]
+fn get_account_profile(app: tauri::AppHandle) -> Result<AccountPublic, String> {
+    let profile = load_account(&app)?.profile;
+    Ok(AccountPublic {
+        username: profile.username,
+        email: profile.email,
+    })
+}
+
+#[tauri::command]
+fn update_account_profile(
+    app: tauri::AppHandle,
+    username: String,
+    email: String,
+) -> Result<(), String> {
+    ensure_authenticated(&app)?;
+
+    let trimmed_username = username.trim();
+    if trimmed_username.is_empty() {
+        return Err("Identifiant invalide".to_string());
+    }
+
+    let trimmed_email = email.trim();
+    if trimmed_email.is_empty() || !trimmed_email.contains('@') {
+        return Err("Email invalide".to_string());
+    }
+
+    let mut account = load_account(&app)?;
+    account.profile.username = trimmed_username.to_string();
+    account.profile.email = trimmed_email.to_string();
+    save_account(&app, &account)
+}
+
+#[tauri::command]
+fn take_initial_reset_token(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    let state = app.state::<InitialResetTokenState>();
+    let mut token = state
+        .0
+        .lock()
+        .map_err(|_| "Etat reset indisponible".to_string())?;
+    Ok(token.take())
+}
+
+#[tauri::command]
+async fn request_password_reset(app: tauri::AppHandle, email: String) -> Result<(), String> {
+    let trimmed_email = email.trim();
+    if trimmed_email.is_empty() {
+        return Err("Email requis".to_string());
+    }
+
+    let mut account = load_account(&app)?;
+    if !trimmed_email.eq_ignore_ascii_case(&account.profile.email) {
+        return Err("Email inconnu".to_string());
+    }
+
+    let token = generate_reset_token();
+    let token_hash = hash_reset_token(&token);
+    let expires_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_secs()
+        + 10 * 60;
+
+    account.reset = Some(ResetState {
+        token_hash,
+        expires_at,
+    });
+    save_account(&app, &account)?;
+
+    let api_key = env::var("RESEND_API_KEY")
+        .map_err(|_| "RESEND_API_KEY manquant".to_string())?;
+    let from = env::var("RESEND_FROM")
+        .unwrap_or_else(|_| "TP Browser <no-reply@xenox.fr>".to_string());
+    let app_link = format!("tp-browser://reset?token={}", token);
+    let action_link = build_reset_action_link(&token);
+
+    let html = format!(
+        "<p>Bonjour,</p>\
+<p>Voici le lien pour reinitialiser le mot de passe :</p>\
+<p><a href=\"{action_link}\" target=\"_blank\" rel=\"noopener\" style=\"display:inline-block;padding:10px 14px;background:#2563eb;color:#ffffff;text-decoration:none;border-radius:8px;font-weight:600;\">Ouvrir TP Browser</a></p>\
+<p style=\"color:#666;font-size:13px;\">Lien direct application :<br><span>{app_link}</span></p>\
+<p>Si le bouton ne s'ouvre pas, copie ce code dans l'application :</p>\
+<p><code style=\"font-size:16px;font-weight:700;\">{token}</code></p>\
+<p>Ce lien expire dans 10 minutes.</p>"
+    );
+
+    let text = format!(
+        "Bonjour,\n\nOuvre TP Browser avec ce lien de reinitialisation :\n{action_link}\n\nLien direct application :\n{app_link}\n\nSi le lien ne s'ouvre pas, copie ce code dans l'application :\n{token}\n\nCe lien expire dans 10 minutes."
+    );
+
+    #[derive(Serialize)]
+    struct ResendEmail {
+        from: String,
+        to: Vec<String>,
+        subject: String,
+        html: String,
+        text: String,
+    }
+
+    let payload = ResendEmail {
+        from,
+        to: vec![account.profile.email.clone()],
+        subject: "TP Browser - Reinitialisation du mot de passe".to_string(),
+        html,
+        text,
+    };
+
+    let response = Client::new()
+        .post("https://api.resend.com/emails")
+        .bearer_auth(api_key)
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|e| format!("Envoi email impossible: {}", e))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(format!("Envoi email impossible: {} {}", status, body));
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+fn reset_password_with_token(
+    app: tauri::AppHandle,
+    token: String,
+    new_password: String,
+) -> Result<(), String> {
+    let mut account = load_account(&app)?;
+    let reset = account
+        .reset
+        .as_ref()
+        .ok_or_else(|| "Aucun reset en cours".to_string())?;
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_secs();
+
+    if now > reset.expires_at {
+        account.reset = None;
+        save_account(&app, &account)?;
+        return Err("Lien expire".to_string());
+    }
+
+    let incoming_hash = hash_reset_token(token.trim());
+    if incoming_hash != reset.token_hash {
+        return Err("Code invalide".to_string());
+    }
+
+    account.profile.password_hash = hash_password_value(&new_password)?;
+    account.reset = None;
+    save_account(&app, &account)
 }

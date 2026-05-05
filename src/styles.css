@@ -467,6 +467,7 @@ pre {
   inset: 0;
   display: grid;
   place-items: center;
+  padding: 24px;
   z-index: 20;
 }
 
@@ -479,7 +480,9 @@ pre {
 .modal-card {
   position: relative;
   z-index: 1;
-  width: min(420px, 90vw);
+  width: min(560px, 100%);
+  max-height: calc(100vh - 48px);
+  overflow: auto;
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: 16px;
@@ -525,6 +528,7 @@ pre {
 .modal-actions {
   display: flex;
   justify-content: flex-end;
+  flex-wrap: wrap;
   gap: 10px;
   margin-top: 4px;
 }
@@ -533,6 +537,53 @@ pre {
   color: #fecaca;
   background: rgba(248, 113, 113, 0.16);
   border: 1px solid rgba(248, 113, 113, 0.35);
+  padding: 8px 10px;
+  border-radius: 8px;
+  font-size: 13px;
+}
+
+.link-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-start;
+  margin-top: 8px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #60a5fa;
+  font-size: 14px;
+  line-height: 1.2;
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.link-btn:hover {
+  color: #93c5fd;
+}
+
+.link-btn:focus-visible {
+  outline: 2px solid #60a5fa;
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+.modal-section {
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+  display: grid;
+  gap: 10px;
+}
+
+.modal-section h3 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.modal-hint {
+  color: #d1e3ff;
+  background: rgba(59, 130, 246, 0.12);
+  border: 1px solid rgba(59, 130, 246, 0.35);
   padding: 8px 10px;
   border-radius: 8px;
   font-size: 13px;

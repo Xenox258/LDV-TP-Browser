@@ -12,6 +12,7 @@ dist
 dist-ssr
 *.local
 .env
+account.json
 target
 **/target
 # Editor directories and files

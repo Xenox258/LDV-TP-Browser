@@ -1,5 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import "/styles.css";
 
 type TreeNode = {
@@ -9,6 +11,11 @@ type TreeNode = {
   isZip: boolean;
   indexPath?: string | null;
   children: TreeNode[];
+};
+
+type SavedSource = {
+  path: string;
+  tree: TreeNode;
 };
 
 let currentTree: TreeNode | null = null;
@@ -37,6 +44,7 @@ app.innerHTML = `
       <div class="brand">TP Browser</div>
       <div class="topbar-actions">
         <button id="auth-btn" class="btn ghost">Se connecter</button>
+        <button id="account-btn" class="btn ghost">Compte</button>
         <button id="import-folder-btn" class="btn">Importer un dossier</button>
         <button id="import-zip-btn" class="btn">Importer un zip</button>
         <button id="toggle-fullscreen-btn" class="btn">Plein écran</button>
@@ -48,10 +56,11 @@ app.innerHTML = `
         <div class="sidebar-header">
   <span>Fichiers</span>
     <div class="sidebar-actions">
-  <button id="create-folder-btn" class="icon-btn" title="Créer un dossier">＋</button>
   <button id="open-folder-btn" class="icon-btn" title="Ouvrir le dossier">📂</button>
+  <button id="create-folder-btn" class="icon-btn" title="Créer un dossier">＋</button>
   <button id="rename-entry-btn" class="icon-btn" title="Renommer">✎</button>
   <button id="delete-entry-btn" class="icon-btn" title="Supprimer">🗑</button>
+  <button id="forget-source-btn" class="icon-btn" title="Oublier le dossier TP">x</button>
   <button id="toggle-sidebar-btn" class="icon-btn icon-collapse" title="Masquer l’arborescence">◀</button>
 </div>
   </div>
@@ -77,25 +86,102 @@ app.innerHTML = `
   </div>
 
   <div id="auth-modal" class="modal is-hidden" role="dialog" aria-modal="true">
-    <div class="modal-backdrop" data-modal-close="true"></div>
-    <div class="modal-card" role="document">
-      <h2>Connexion admin</h2>
-      <p class="modal-subtitle">Entre l'identifiant et le mot de passe pour gérer les dossiers TP.</p>
+  <div class="modal-backdrop" data-modal-close="true"></div>
+  <div class="modal-card" role="document">
+    <h2 id="auth-title">Connexion admin</h2>
+    <p id="auth-subtitle" class="modal-subtitle">
+      Entre l'identifiant et le mot de passe pour gérer les dossiers TP.
+    </p>
+
+    <div id="auth-login-section">
       <form id="auth-form" class="modal-form">
         <label class="modal-field">
           <span>Identifiant</span>
           <input id="auth-username" type="text" autocomplete="username" required />
         </label>
+
         <label class="modal-field">
           <span>Mot de passe</span>
           <input id="auth-password" type="password" autocomplete="current-password" required />
         </label>
-        <div id="auth-error" class="modal-error is-hidden">Identifiant ou mot de passe incorrect.</div>
+
+        <div class="modal-helper-row">
+          <button type="button" id="forgot-password-btn" class="link-btn">
+            Mot de passe oublié ?
+          </button>
+        </div>
+
+        <div id="auth-error" class="modal-error is-hidden">
+          Identifiant ou mot de passe incorrect.
+        </div>
+
         <div class="modal-actions">
           <button type="button" id="auth-cancel" class="btn ghost">Annuler</button>
           <button type="submit" class="btn">Se connecter</button>
         </div>
       </form>
+    </div>
+
+    <div id="auth-reset" class="modal-section is-hidden">
+      <form id="reset-form" class="modal-form">
+        <label class="modal-field">
+          <span>Email du compte</span>
+          <input id="reset-email" type="email" autocomplete="email" required />
+        </label>
+
+        <div id="reset-send-status" class="modal-hint is-hidden"></div>
+
+        <div class="modal-actions">
+          <button type="button" id="back-to-login-btn" class="btn ghost">Retour</button>
+          <button type="button" id="send-reset-btn" class="btn">Envoyer le lien</button>
+        </div>
+
+        <label class="modal-field">
+          <span>Code de reinitialisation</span>
+          <input id="reset-token" type="text" autocomplete="one-time-code" />
+        </label>
+
+        <label class="modal-field">
+          <span>Nouveau mot de passe</span>
+          <input id="reset-password" type="password" autocomplete="new-password" />
+        </label>
+
+        <label class="modal-field">
+          <span>Confirmer le mot de passe</span>
+          <input id="reset-password-confirm" type="password" autocomplete="new-password" />
+        </label>
+
+        <div id="reset-apply-status" class="modal-hint is-hidden"></div>
+
+        <div class="modal-actions">
+          <button type="button" id="reset-password-btn" class="btn">Modifier le mot de passe</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+
+  <div id="account-modal" class="modal is-hidden" role="dialog" aria-modal="true">
+    <div class="modal-backdrop" data-modal-close="account"></div>
+    <div class="modal-card" role="document">
+      <h2>Compte admin</h2>
+      <p class="modal-subtitle">Gere l'identifiant, l'email et le mot de passe.</p>
+      <form id="account-form" class="modal-form">
+        <label class="modal-field">
+          <span>Identifiant</span>
+          <input id="account-username" type="text" autocomplete="username" required />
+        </label>
+        <label class="modal-field">
+          <span>Email</span>
+          <input id="account-email" type="email" autocomplete="email" required />
+        </label>
+        <div id="account-save-status" class="modal-hint is-hidden"></div>
+        <div class="modal-actions">
+          <button type="button" id="account-cancel" class="btn ghost">Annuler</button>
+          <button type="submit" class="btn">Enregistrer</button>
+        </div>
+      </form>
+
     </div>
   </div>
 `;
@@ -103,22 +189,43 @@ app.innerHTML = `
 const folderBtn = document.querySelector<HTMLButtonElement>("#import-folder-btn");
 const zipBtn = document.querySelector<HTMLButtonElement>("#import-zip-btn");
 const authBtn = document.querySelector<HTMLButtonElement>("#auth-btn");
+const accountBtn = document.querySelector<HTMLButtonElement>("#account-btn");
 const openFolderBtn = document.querySelector<HTMLButtonElement>("#open-folder-btn");
 const toggleSidebarBtn = document.querySelector<HTMLButtonElement>("#toggle-sidebar-btn");
 const expandSidebarBtn = document.querySelector<HTMLButtonElement>("#expand-sidebar-btn");
 const toggleFullscreenBtn = document.querySelector<HTMLButtonElement>("#toggle-fullscreen-btn");
 const authModal = document.querySelector<HTMLDivElement>("#auth-modal");
+const accountModal = document.querySelector<HTMLDivElement>("#account-modal");
 const authForm = document.querySelector<HTMLFormElement>("#auth-form");
 const authCancel = document.querySelector<HTMLButtonElement>("#auth-cancel");
 const authUsername = document.querySelector<HTMLInputElement>("#auth-username");
 const authPassword = document.querySelector<HTMLInputElement>("#auth-password");
 const authError = document.querySelector<HTMLDivElement>("#auth-error");
+const forgotPasswordBtn = document.querySelector<HTMLButtonElement>("#forgot-password-btn");
+const authResetSection = document.querySelector<HTMLDivElement>("#auth-reset");
+const accountForm = document.querySelector<HTMLFormElement>("#account-form");
+const accountCancel = document.querySelector<HTMLButtonElement>("#account-cancel");
+const accountUsername = document.querySelector<HTMLInputElement>("#account-username");
+const accountEmail = document.querySelector<HTMLInputElement>("#account-email");
+const accountSaveStatus = document.querySelector<HTMLDivElement>("#account-save-status");
+const sendResetBtn = document.querySelector<HTMLButtonElement>("#send-reset-btn");
+const resetSendStatus = document.querySelector<HTMLDivElement>("#reset-send-status");
+const resetEmailInput = document.querySelector<HTMLInputElement>("#reset-email");
+const resetTokenInput = document.querySelector<HTMLInputElement>("#reset-token");
+const resetPasswordInput = document.querySelector<HTMLInputElement>("#reset-password");
+const resetPasswordConfirmInput = document.querySelector<HTMLInputElement>("#reset-password-confirm");
+const resetPasswordBtn = document.querySelector<HTMLButtonElement>("#reset-password-btn");
+const resetApplyStatus = document.querySelector<HTMLDivElement>("#reset-apply-status");
 const treeRoot = document.querySelector<HTMLDivElement>("#tree-root");
 const viewerContent = document.querySelector<HTMLDivElement>("#viewer-content");
 const shell = document.querySelector<HTMLDivElement>(".shell");
 const createFolderBtn = document.querySelector<HTMLButtonElement>("#create-folder-btn");
 const renameEntryBtn = document.querySelector<HTMLButtonElement>("#rename-entry-btn");
 const deleteEntryBtn = document.querySelector<HTMLButtonElement>("#delete-entry-btn");
+const forgetSourceBtn = document.querySelector<HTMLButtonElement>("#forget-source-btn");
+const authLoginSection = document.querySelector<HTMLDivElement>("#auth-login-section");
+const authTitle = document.querySelector<HTMLHeadingElement>("#auth-title");
+const authSubtitle = document.querySelector<HTMLParagraphElement>("#auth-subtitle");
 
 function escapeHtml(value: string): string {
   return value
@@ -159,37 +266,131 @@ function setAuthenticated(nextValue: boolean) {
   }
 
   const hideManagement = !isAuthenticated;
+  toggleHidden(accountBtn, hideManagement);
   toggleHidden(folderBtn, hideManagement);
   toggleHidden(zipBtn, hideManagement);
   toggleHidden(openFolderBtn, hideManagement);
   toggleHidden(createFolderBtn, hideManagement);
   toggleHidden(renameEntryBtn, hideManagement);
   toggleHidden(deleteEntryBtn, hideManagement);
+  toggleHidden(forgetSourceBtn, hideManagement);
+
+  if (!isAuthenticated) {
+    closeAccountModal();
+  }
 
   updateActionButtonsState();
 }
 
 function openAuthModal() {
   if (!authModal) return;
+
   toggleHidden(authModal, false);
   toggleHidden(authError, true);
+  toggleHidden(authLoginSection, false);
+  toggleHidden(authResetSection, true);
+
+  if (authTitle) authTitle.textContent = "Connexion admin";
+  if (authSubtitle) {
+    authSubtitle.textContent = "Entre l'identifiant et le mot de passe pour gérer les dossiers TP.";
+  }
+
+  clearModalHint(resetSendStatus);
+  clearModalHint(resetApplyStatus);
+
   if (authUsername) authUsername.value = "";
   if (authPassword) authPassword.value = "";
-  requestAnimationFrame(() => {
-    authUsername?.focus();
-  });
+  if (resetEmailInput) resetEmailInput.value = "";
+  if (resetTokenInput) resetTokenInput.value = "";
+  if (resetPasswordInput) resetPasswordInput.value = "";
+  if (resetPasswordConfirmInput) resetPasswordConfirmInput.value = "";
+
+  requestAnimationFrame(() => authUsername?.focus());
 }
 
 function closeAuthModal() {
   if (!authModal) return;
+
   toggleHidden(authModal, true);
   toggleHidden(authError, true);
+  toggleHidden(authLoginSection, false);
+  toggleHidden(authResetSection, true);
+
+  if (authTitle) authTitle.textContent = "Connexion admin";
+  if (authSubtitle) {
+    authSubtitle.textContent = "Entre l'identifiant et le mot de passe pour gérer les dossiers TP.";
+  }
 }
 
 function showAuthError(message: string) {
   if (!authError) return;
   authError.textContent = message;
   toggleHidden(authError, false);
+}
+
+function setModalHint(element: HTMLElement | null, message: string) {
+  if (!element) return;
+  element.textContent = message;
+  toggleHidden(element, false);
+}
+
+function clearModalHint(element: HTMLElement | null) {
+  if (!element) return;
+  element.textContent = "";
+  toggleHidden(element, true);
+}
+
+async function openAccountModal(prefillToken?: string) {
+  if (!accountModal) return;
+  if (!isAuthenticated) return;
+
+  toggleHidden(accountModal, false);
+  clearModalHint(accountSaveStatus);
+  clearModalHint(resetSendStatus);
+  clearModalHint(resetApplyStatus);
+
+  try {
+    const profile = await invoke<{ username: string; email: string }>(
+      "get_account_profile"
+    );
+    if (accountUsername) accountUsername.value = profile.username;
+    if (accountEmail) accountEmail.value = profile.email;
+  } catch (error) {
+    setModalHint(accountSaveStatus, `Erreur: ${String(error)}`);
+  }
+}
+
+async function openAuthReset(prefillToken?: string) {
+  if (!authModal) return;
+  toggleHidden(authModal, false);
+  toggleHidden(authError, true);
+  toggleHidden(authLoginSection, true);
+  toggleHidden(authResetSection, false);
+  clearModalHint(resetSendStatus);
+  clearModalHint(resetApplyStatus);
+
+  if (authTitle) authTitle.textContent = "Reinitialiser le mot de passe";
+  if (authSubtitle) {
+    authSubtitle.textContent = "Demande un lien de reinitialisation puis definis ton nouveau mot de passe.";
+  }
+
+  if (prefillToken && resetTokenInput) {
+    resetTokenInput.value = prefillToken;
+  }
+
+  try {
+    const profile = await invoke<{ email: string }>("get_account_profile");
+    if (resetEmailInput && !resetEmailInput.value) {
+      resetEmailInput.value = profile.email;
+    }
+  } catch (error) {
+    setModalHint(resetSendStatus, `Erreur: ${String(error)}`);
+  }
+}
+
+function closeAccountModal() {
+  if (!accountModal) return;
+  toggleHidden(accountModal, true);
 }
 
 async function loginWithCredentials(username: string, password: string) {
@@ -402,6 +603,7 @@ function updateActionButtonsState() {
   createFolderBtn?.toggleAttribute("disabled", disabled);
   renameEntryBtn?.toggleAttribute("disabled", disabled);
   deleteEntryBtn?.toggleAttribute("disabled", disabled);
+  forgetSourceBtn?.toggleAttribute("disabled", isScanning || !currentRootPath || !isAuthenticated);
 
   if (createFolderBtn) {
     createFolderBtn.title = isReadOnlyTree
@@ -419,6 +621,12 @@ function updateActionButtonsState() {
     deleteEntryBtn.title = isReadOnlyTree
       ? "Action indisponible sur un zip"
       : "Supprimer";
+  }
+
+  if (forgetSourceBtn) {
+    forgetSourceBtn.title = currentRootPath
+      ? "Oublier le dossier TP"
+      : "Aucun dossier TP defini";
   }
 
   folderBtn?.toggleAttribute("disabled", isScanning || !isAuthenticated);
@@ -892,6 +1100,40 @@ deleteEntryBtn?.addEventListener("click", async () => {
   }
 });
 
+forgetSourceBtn?.addEventListener("click", async () => {
+  if (!isAuthenticated) {
+    alert("Connecte-toi pour oublier le dossier TP.");
+    return;
+  }
+  if (!currentRootPath) return;
+
+  const confirmed = window.confirm(
+    "Oublier le dossier TP actuel ? Les fichiers ne seront pas supprimes."
+  );
+  if (!confirmed) return;
+
+  try {
+    await invoke("forget_saved_source");
+    currentRootPath = null;
+    currentTree = null;
+    selectedPath = null;
+    isReadOnlyTree = false;
+    expandedPaths.clear();
+    editingPath = null;
+    creatingInParentPath = null;
+    renderTree();
+    updateActionButtonsState();
+    setViewerEmbedded(false);
+    setViewerHtml(`
+      <div class="empty-state">
+        Aucun dossier TP defini. Connecte-toi en admin puis importe un dossier.
+      </div>
+    `);
+  } catch (error) {
+    alert(`Erreur: ${String(error)}`);
+  }
+});
+
 function renderTree() {
   if (!treeRoot) return;
 
@@ -909,7 +1151,13 @@ function renderTree() {
   treeRoot.appendChild(ul);
 }
 
-function setViewerFullscreenState(nextValue: boolean) {
+async function setViewerFullscreenState(nextValue: boolean) {
+  try {
+    await getCurrentWindow().setFullscreen(nextValue);
+  } catch (error) {
+    console.error("Impossible de changer le plein ecran natif:", error);
+  }
+
   isViewerFullscreen = nextValue;
   shell?.classList.toggle("viewer-fullscreen", isViewerFullscreen);
 
@@ -934,6 +1182,20 @@ function findNodeByPath(path: string): TreeNode | null {
 
   return null;
 }
+
+const backToLoginBtn = document.querySelector<HTMLButtonElement>("#back-to-login-btn");
+
+backToLoginBtn?.addEventListener("click", () => {
+  toggleHidden(authLoginSection, false);
+  toggleHidden(authResetSection, true);
+
+  if (authTitle) authTitle.textContent = "Connexion admin";
+  if (authSubtitle) {
+    authSubtitle.textContent = "Entre l'identifiant et le mot de passe pour gérer les dossiers TP.";
+  }
+
+  requestAnimationFrame(() => authUsername?.focus());
+});
 
 async function refreshTree() {
   if (!currentRootPath) return;
@@ -990,6 +1252,59 @@ function getSelectedNode(): TreeNode | null {
   return findNodeByPath(selectedPath);
 }
 
+async function applyLoadedTree(path: string, tree: TreeNode, requestId?: number) {
+  currentRootPath = path;
+  currentTree = tree;
+  isReadOnlyTree = isZipTreeRoot(tree);
+  selectedPath = tree.path;
+
+  expandedPaths.clear();
+  expandedPaths.add(tree.path);
+
+  setScanUi(false);
+  updateActionButtonsState();
+  renderTree();
+
+  if (tree.indexPath) {
+    await renderEmbeddedPreview(tree.indexPath, requestId);
+  } else if (!tree.isDir) {
+    renderDetails(tree, requestId);
+  } else {
+    renderFolderHint(requestId);
+  }
+}
+
+async function loadSavedSource() {
+  const requestId = beginViewerRequest();
+  setScanUi(true);
+  renderScanSpinner(requestId);
+
+  try {
+    const saved = await invoke<SavedSource | null>("load_saved_source");
+    if (!saved) {
+      setScanUi(false);
+      setViewerEmbedded(false, requestId);
+      setViewerHtml(`
+        <div class="empty-state">
+          Aucun dossier TP defini. Connecte-toi en admin puis importe un dossier.
+        </div>
+      `, requestId);
+      return;
+    }
+
+    await applyLoadedTree(saved.path, saved.tree, requestId);
+  } catch (error) {
+    setScanUi(false);
+    setViewerEmbedded(false, requestId);
+    setViewerHtml(`
+      <div class="error-state">
+        <strong>Erreur</strong>
+        <pre>${escapeHtml(String(error))}</pre>
+      </div>
+    `, requestId);
+  }
+}
+
 async function scanPath(path: string) {
   const requestId = beginViewerRequest();
   setScanUi(true);
@@ -997,26 +1312,7 @@ async function scanPath(path: string) {
 
   try {
     const tree = await invoke<TreeNode>("scan_source", { path });
-
-    currentRootPath = path;
-    currentTree = tree;
-    isReadOnlyTree = isZipTreeRoot(tree);
-    selectedPath = tree.path;
-
-    expandedPaths.clear();
-    expandedPaths.add(tree.path);
-
-    setScanUi(false);
-    updateActionButtonsState();
-    renderTree();
-
-    if (tree.indexPath) {
-      await renderEmbeddedPreview(tree.indexPath, requestId);
-    } else if (!tree.isDir) {
-      renderDetails(tree, requestId);
-    } else {
-      renderFolderHint(requestId);
-    }
+    await applyLoadedTree(path, tree, requestId);
   } catch (error) {
     setScanUi(false);
 
@@ -1129,7 +1425,7 @@ toggleSidebarBtn?.addEventListener("click", () => {
 });
 
 toggleFullscreenBtn?.addEventListener("click", () => {
-  setViewerFullscreenState(!isViewerFullscreen);
+  void setViewerFullscreenState(!isViewerFullscreen);
 });
 
 authBtn?.addEventListener("click", () => {
@@ -1140,8 +1436,31 @@ authBtn?.addEventListener("click", () => {
   }
 });
 
+accountBtn?.addEventListener("click", () => {
+  void openAccountModal();
+});
+
 authCancel?.addEventListener("click", () => {
   closeAuthModal();
+});
+
+forgotPasswordBtn?.addEventListener("click", () => {
+  toggleHidden(authError, true);
+  toggleHidden(authLoginSection, true);
+  toggleHidden(authResetSection, false);
+
+  if (authTitle) authTitle.textContent = "Réinitialiser le mot de passe";
+  if (authSubtitle) {
+    authSubtitle.textContent = "Demande un lien de réinitialisation puis définis ton nouveau mot de passe.";
+  }
+
+  clearModalHint(resetSendStatus);
+  clearModalHint(resetApplyStatus);
+  requestAnimationFrame(() => resetEmailInput?.focus());
+});
+
+accountCancel?.addEventListener("click", () => {
+  closeAccountModal();
 });
 
 authModal?.addEventListener("click", (event) => {
@@ -1149,6 +1468,14 @@ authModal?.addEventListener("click", (event) => {
   if (!target) return;
   if (target.dataset.modalClose === "true") {
     closeAuthModal();
+  }
+});
+
+accountModal?.addEventListener("click", (event) => {
+  const target = event.target as HTMLElement | null;
+  if (!target) return;
+  if (target.dataset.modalClose === "account") {
+    closeAccountModal();
   }
 });
 
@@ -1160,12 +1487,79 @@ authForm?.addEventListener("submit", async (event) => {
   await loginWithCredentials(username, password);
 });
 
+accountForm?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  clearModalHint(accountSaveStatus);
+
+  const username = accountUsername?.value.trim() ?? "";
+  const email = accountEmail?.value.trim() ?? "";
+
+  try {
+    await invoke("update_account_profile", { username, email });
+    setModalHint(accountSaveStatus, "Compte mis a jour.");
+  } catch (error) {
+    setModalHint(accountSaveStatus, `Erreur: ${String(error)}`);
+  }
+});
+
+sendResetBtn?.addEventListener("click", async () => {
+  clearModalHint(resetSendStatus);
+  const email = resetEmailInput?.value.trim() ?? "";
+  try {
+    await invoke("request_password_reset", { email });
+    setModalHint(resetSendStatus, "Lien envoyé. Vérifie ta boîte mail.");
+  } catch (error) {
+    setModalHint(resetSendStatus, `Erreur : ${String(error)}`);
+  }
+});
+
+resetPasswordBtn?.addEventListener("click", async () => {
+  clearModalHint(resetApplyStatus);
+
+  const token = resetTokenInput?.value.trim() ?? "";
+  const password = resetPasswordInput?.value ?? "";
+  const confirm = resetPasswordConfirmInput?.value ?? "";
+
+  if (!token) {
+    setModalHint(resetApplyStatus, "Code requis.");
+    return;
+  }
+  if (!password || password !== confirm) {
+    setModalHint(resetApplyStatus, "Les mots de passe ne correspondent pas.");
+    return;
+  }
+
+  try {
+    await invoke("reset_password_with_token", {
+      token,
+      newPassword: password,
+    });
+    toggleHidden(authLoginSection, false);
+    toggleHidden(authResetSection, true);
+    toggleHidden(authError, true);
+
+    if (resetTokenInput) resetTokenInput.value = "";
+    if (resetPasswordInput) resetPasswordInput.value = "";
+    if (resetPasswordConfirmInput) resetPasswordConfirmInput.value = "";
+
+    if (authTitle) authTitle.textContent = "Connexion admin";
+    if (authSubtitle) {
+      authSubtitle.textContent = "Mot de passe mis a jour. Connecte-toi avec ton nouveau mot de passe.";
+    }
+    if (authPassword) authPassword.value = "";
+
+    requestAnimationFrame(() => authPassword?.focus());
+  } catch (error) {
+    setModalHint(resetApplyStatus, `Erreur: ${String(error)}`);
+  }
+});
+
 const exitFullscreenBtn = document.querySelector<HTMLButtonElement>(
   "#exit-fullscreen-btn"
 );
 
 exitFullscreenBtn?.addEventListener("click", () => {
-  setViewerFullscreenState(false);
+  void setViewerFullscreenState(false);
 });
 
 expandSidebarBtn?.addEventListener("click", () => {
@@ -1181,10 +1575,22 @@ expandSidebarBtn?.addEventListener("click", () => {
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && isViewerFullscreen) {
     event.preventDefault();
-    setViewerFullscreenState(false);
+    void setViewerFullscreenState(false);
+  }
+});
+
+void listen<string>("reset_link", (event) => {
+  const token = event.payload;
+  void openAuthReset(token);
+});
+
+void invoke<string | null>("take_initial_reset_token").then((token) => {
+  if (token) {
+    void openAuthReset(token);
   }
 });
 
 updateActionButtonsState();
 renderTree();
 setAuthenticated(false);
+void loadSavedSource();

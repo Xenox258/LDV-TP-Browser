@@ -20,6 +20,13 @@
       "csp": null
     }
   },
+  "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": ["tp-browser"]
+      }
+    }
+  },
   "bundle": {
     "active": true,
     "targets": "all",

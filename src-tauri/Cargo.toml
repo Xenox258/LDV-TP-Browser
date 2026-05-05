@@ -25,7 +25,11 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 zip = "2"
 tauri-plugin-dialog = "2"
+tauri-plugin-deep-link = "2"
 urlencoding = "2.1"
 argon2 = "0.5"
 dotenvy = "0.15"
 rand_core = { version = "0.6", features = ["getrandom"] }
+base64 = "0.22"
+reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
+sha2 = "0.10"
