@@ -2,6 +2,9 @@
 
 TP Browser est une application Tauri pour consulter, organiser et distribuer des TP HTML/Scenari. Elle est pensée pour un usage au lycee du Vimeu : un enseignant importe et gere les dossiers TP, puis exporte une version eleve contenant l'application et les TP dans une archive zip.
 
+<img width="1919" height="1089" alt="image" src="https://github.com/user-attachments/assets/b47a442c-5696-49be-aaf3-937313d1fe95" />
+
+
 ## Fonctionnalites
 
 - Lecture integree des TP HTML avec iframe.
